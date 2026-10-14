@@ -62,6 +62,14 @@ class Registry:
         endpoint.add_online_listener(self._on_online)
         log.info("Endpoint added: %s (%s, %s)", endpoint.name, endpoint.third_serial, endpoint.display_category)
 
+    def remove(self, third_serial: str) -> None:
+        """Forget an endpoint (its gateway serial is kept so a re-added endpoint maps to the same device)."""
+        self.endpoints.pop(third_serial, None)
+        self._reported.pop(third_serial, None)
+
+    def is_current(self, endpoint: Endpoint) -> bool:
+        return self.endpoints.get(endpoint.third_serial) is endpoint
+
     def serial_of(self, endpoint: Endpoint) -> str | None:
         return self.serials.get(endpoint.third_serial)
 
@@ -128,6 +136,8 @@ class Registry:
             self.sample_energy(ep)
 
     async def report(self, endpoint: Endpoint) -> None:
+        if not self.is_current(endpoint):
+            return  # a replaced endpoint whose old device thread is still winding down
         self.sample_energy(endpoint)
         serial = self.serial_of(endpoint)
         if not serial or not self.client.token_valid:
@@ -147,6 +157,8 @@ class Registry:
             log.warning("State report failed for %s: %s", endpoint.name, exc)
 
     async def _report_online(self, endpoint: Endpoint, online: bool) -> None:
+        if not self.is_current(endpoint):
+            return
         serial = self.serial_of(endpoint)
         if not serial or not self.client.token_valid:
             return

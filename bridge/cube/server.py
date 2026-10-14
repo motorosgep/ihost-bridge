@@ -29,6 +29,9 @@ def make_app(bridge: BridgeApp) -> web.Application:
             web.post("/api/debug/query", api_debug_query),
             web.get("/api/debug/cards", api_debug_cards),
             web.post("/api/control", api_control),
+            web.post("/api/setup/keys", api_setup_keys),
+            web.post("/api/setup/config", api_setup_config),
+            web.post("/api/reload", api_reload),
             web.get("/api/cards/heatpump", api_card_heatpump),
             web.get("/cards/heatpump", card_heatpump),
             web.get("/cards/heatpump/drawer", card_heatpump_drawer),
@@ -53,6 +56,34 @@ async def api_card_heatpump(request: web.Request) -> web.Response:
 
     bridge: BridgeApp = request.app["bridge"]
     return web.json_response(card_data(bridge.registry.endpoints))
+
+
+async def api_setup_keys(request: web.Request) -> web.Response:
+    """Receive the Midea token/key file as text, store it, and reconnect the appliances."""
+    bridge: BridgeApp = request.app["bridge"]
+    try:
+        count = bridge.save_keys(await request.text())
+    except (ValueError, TypeError) as exc:
+        return web.json_response({"ok": False, "error": f"not a valid key file: {exc}"}, status=400)
+    ok, message = await bridge.reload_midea()
+    return web.json_response({"ok": ok, "message": f"saved keys for {count} device(s); {message}"})
+
+
+async def api_setup_config(request: web.Request) -> web.Response:
+    """Receive config.yaml as text, store it, and reconnect the appliances with the new settings."""
+    bridge: BridgeApp = request.app["bridge"]
+    try:
+        bridge.save_config(await request.text())
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"ok": False, "error": f"not a valid config: {exc}"}, status=400)
+    ok, message = await bridge.reload_midea()
+    return web.json_response({"ok": ok, "message": f"config saved; {message}"})
+
+
+async def api_reload(request: web.Request) -> web.Response:
+    bridge: BridgeApp = request.app["bridge"]
+    ok, message = await bridge.reload_midea()
+    return web.json_response({"ok": ok, "message": message})
 
 
 async def api_control(request: web.Request) -> web.Response:
@@ -183,6 +214,30 @@ INDEX_HTML = """<!doctype html>
   <table id="devices"><thead><tr><th>Name</th><th>Category</th><th>Serial</th><th>Online</th><th>State</th></tr></thead><tbody></tbody></table>
 </div>
 
+<div class="card">
+  <div class="row"><strong>Setup</strong><span id="setup-state" class="pill">…</span></div>
+  <p class="muted">
+    Paste the <code>midea-devices.json</code> produced by <code>midealocal discover</code> (the Midea token/key
+    cache) and save it; the appliances connect right away. Optionally paste a <code>config.yaml</code> to name
+    devices (see <code>config.example.yaml</code>).
+  </p>
+  <textarea id="keys" rows="5" style="width:100%;font-family:monospace;font-size:.8rem" placeholder='{"devices": [{"device_id": "...", "token": "...", "key": "..."}]}'></textarea>
+  <div class="row" style="margin:.4rem 0 1rem"><button class="primary" onclick="saveKeys()">Save keys and connect</button></div>
+  <textarea id="config" rows="6" style="width:100%;font-family:monospace;font-size:.8rem" placeholder="midea:&#10;  devices:&#10;    - device_id: 153931628306230&#10;      name: Living room AC"></textarea>
+  <div class="row" style="margin:.4rem 0"><button onclick="saveConfig()">Save config and reconnect</button><button onclick="reloadDevices()">Reconnect appliances</button></div>
+  <div id="setup-msg" class="muted"></div>
+</div>
+
+<script>
+async function postText(url, text) {
+  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: text});
+  const j = await r.json(); return j.ok ? j.message : ('Error: ' + (j.error || j.message));
+}
+async function saveKeys() { document.getElementById('setup-msg').textContent = 'Saving…'; document.getElementById('setup-msg').textContent = await postText('/api/setup/keys', document.getElementById('keys').value); refresh(); }
+async function saveConfig() { document.getElementById('setup-msg').textContent = 'Saving…'; document.getElementById('setup-msg').textContent = await postText('/api/setup/config', document.getElementById('config').value); refresh(); }
+async function reloadDevices() { document.getElementById('setup-msg').textContent = 'Reconnecting…'; const j = await (await fetch('/api/reload', {method: 'POST'})).json(); document.getElementById('setup-msg').textContent = j.message; refresh(); }
+</script>
+
 <script>
 async function refresh() {
   try {
@@ -193,6 +248,9 @@ async function refresh() {
     t.textContent = s.cube.token_valid ? 'token OK' : (s.cube.waiting_for_token ? 'waiting for Allow on the iHost…' : 'no valid token');
     t.className = 'pill ' + (s.cube.token_valid ? 'ok' : 'bad');
     document.getElementById('msg').textContent = s.cube.last_error ? ('Last error: ' + s.cube.last_error) : '';
+    const st = document.getElementById('setup-state');
+    st.textContent = s.setup.keys_present ? `${s.setup.appliances} appliance(s) configured` : 'no Midea key file yet';
+    st.className = 'pill ' + (s.setup.keys_present ? 'ok' : 'bad');
     const tb = document.querySelector('#devices tbody'); tb.innerHTML = '';
     for (const d of s.endpoints) {
       const tr = document.createElement('tr');

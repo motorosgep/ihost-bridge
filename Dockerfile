@@ -11,8 +11,7 @@ RUN pip wheel --no-cache-dir --wheel-dir /wheels .
 
 FROM python:3.12-slim
 LABEL org.opencontainers.image.title="ihost-bridge" \
-      org.opencontainers.image.description="Bridge Midea and other appliances into a SONOFF iHost / eWeLink CUBE" \
-      org.opencontainers.image.source="https://github.com/OWNER/ihost-bridge"
+      org.opencontainers.image.description="Bridge Midea and other appliances into a SONOFF iHost / eWeLink CUBE"
 WORKDIR /app
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels

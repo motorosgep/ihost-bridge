@@ -217,11 +217,77 @@ class BridgeApp:
             self.message = "Timed out waiting for the token; press Get Token again"
             log.warning(self.message)
 
+    # ----- setup from the web UI (the add-on has no other way to receive files) -----
+
+    def save_keys(self, text: str) -> int:
+        """Store a midea-devices.json (midea-local cache format, or a bare list of entries). Returns entry count."""
+        data = json.loads(text)
+        entries = data.get("devices") if isinstance(data, dict) else data
+        if not isinstance(entries, list) or not entries:
+            raise ValueError('expected {"devices": [{"device_id", "token", "key"}, ...]}')
+        for entry in entries:
+            if not all(k in entry for k in ("device_id", "token", "key")):
+                raise ValueError("every entry needs device_id, token and key")
+        path = self.cfg.midea.keys_file or (self.cfg.data_dir / "midea-devices.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"devices": entries}, indent=2))
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        self.cfg.midea.keys_file = path
+        log.info("Saved Midea keys for %d device(s) to %s", len(entries), path)
+        return len(entries)
+
+    def save_config(self, text: str) -> None:
+        """Store config.yaml and re-read the sections that can change without a restart."""
+        import yaml
+
+        from bridge.config import load
+
+        parsed = yaml.safe_load(text) if text.strip() else {}
+        if parsed is not None and not isinstance(parsed, dict):
+            raise ValueError("config must be a YAML mapping")
+        path = self.cfg.data_dir / "config.yaml"
+        path.write_text(text)
+        fresh = load(str(path))
+        self.cfg.midea = fresh.midea
+        self.cfg.cards = fresh.cards
+        log.info("Saved config to %s", path)
+
+    async def reload_midea(self) -> tuple[bool, str]:
+        """Drop every Midea device and set them up again (after keys or config changed)."""
+        assert self.registry
+        for dev in self._devices:
+            try:
+                dev.close()
+            except Exception:  # noqa: BLE001
+                pass
+        for ep in [ep for ep in self.registry.endpoints.values() if getattr(ep, "device", None) is not None]:
+            self.registry.remove(ep.third_serial)
+        self._devices = []
+        if self.cfg.midea.enabled:
+            await self._setup_midea()
+        count = len(self.registry.endpoints)
+        if self.client and self.client.token:
+            ok, message = await self.sync()
+            return ok, f"{count} endpoint(s) set up; {message}"
+        self.message = f"{count} endpoint(s) set up; press Get Token to register them with the gateway"
+        return True, self.message
+
     def status(self) -> dict[str, Any]:
         assert self.client and self.registry
+        keys_file = self.cfg.midea.keys_file
         return {
             "version": __version__,
             "message": self.message,
+            "setup": {
+                "keys_file": str(keys_file) if keys_file else None,
+                "keys_present": bool(keys_file and keys_file.is_file()),
+                "config_file": str(self.cfg.data_dir / "config.yaml"),
+                "config_present": (self.cfg.data_dir / "config.yaml").is_file(),
+                "appliances": len(self._devices),
+            },
             "cube": {
                 "host": self.client.host,
                 "service_address": self.registry.service_address,
