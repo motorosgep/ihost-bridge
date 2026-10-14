@@ -1,0 +1,8 @@
+.venv
+data
+.git
+__pycache__
+*.pyc
+midea-devices*.json
+cube_token.json
+config.yaml

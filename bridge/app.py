@@ -1,0 +1,394 @@
+"""Application wiring: gateway client, registry, vendor adapters and the web server."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import signal
+import socket
+from typing import Any
+
+import aiohttp
+from aiohttp import web
+
+from bridge import __version__
+from bridge.config import Config
+from bridge.core.registry import Registry
+from bridge.cube.client import CubeAuthError, CubeClient, CubeError
+from bridge.cube.server import make_app
+
+log = logging.getLogger(__name__)
+
+LOCAL_GATEWAY_NAMES = {"ihost", "ihost.local", "localhost", "127.0.0.1"}
+
+
+class BridgeApp:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.client: CubeClient | None = None
+        self.registry: Registry | None = None
+        self.message = "starting"
+        self._token_task: asyncio.Task | None = None
+        self._devices: list[Any] = []
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._late_sync_running = False
+
+    # ----- lifecycle ---------------------------------------------------------
+
+    async def run(self) -> None:
+        cfg = self.cfg
+        self._loop = asyncio.get_running_loop()
+        # Fresh connection per request: the gateway resets pooled keep-alive sockets after a short idle time.
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as session:
+            self.client = CubeClient(session, cfg.cube.host, cfg.cube.app_name, cfg.data_dir)
+            service_address = self._service_address()
+            self.registry = Registry(self.client, cfg.data_dir, service_address)
+
+            if cfg.midea.enabled:
+                await self._setup_midea()
+
+            runner = web.AppRunner(make_app(self))
+            await runner.setup()
+            await web.TCPSite(runner, "0.0.0.0", cfg.cube.port).start()
+            log.info("ihost-bridge %s: web UI on port %d, gateway callback %s", __version__, cfg.cube.port, service_address)
+
+            await self._initial_sync()
+
+            stop = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, stop.set)
+                except NotImplementedError:  # not on this platform
+                    pass
+            try:
+                while not stop.is_set():
+                    try:
+                        await asyncio.wait_for(stop.wait(), 60)
+                    except asyncio.TimeoutError:
+                        await self._housekeeping()
+            finally:
+                log.info("Shutting down")
+                for dev in self._devices:
+                    try:
+                        dev.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                await runner.cleanup()
+
+    def _service_address(self) -> str:
+        cfg = self.cfg.cube
+        host = cfg.service_host
+        if not host:
+            if cfg.host in LOCAL_GATEWAY_NAMES:
+                host = "ihost"  # running as an add-on on the gateway itself (host network)
+            else:
+                host = _local_ip_towards(cfg.host)
+        return f"http://{host}:{cfg.port}/webhook"
+
+    async def _initial_sync(self) -> None:
+        assert self.client and self.registry
+        if not self.client.token:
+            self.message = "No gateway token yet: open the web UI and press Get Token"
+            log.warning(self.message)
+            return
+        ok, message = await self.sync()
+        self.message = message
+        if not ok:
+            log.warning(message)
+
+    async def _housekeeping(self) -> None:
+        assert self.client and self.registry
+        self.registry.sample_energy_all()
+        self._remember_pushed_attributes()
+        if self.client.token and self.client.token_valid and not self.registry.synced:
+            await self.sync()
+
+    PUSHED_ATTRIBUTES = ("outdoor_temperature", "total_energy_consumption", "total_produced_energy", "status_heating", "status_dhw")
+
+    def _remember_pushed_attributes(self) -> None:
+        """Persist the attributes that only arrive by push, so a restart can pre-seed them."""
+        seen_file = self.cfg.data_dir / "midea-seen.json"
+        try:
+            seen = json.loads(seen_file.read_text())
+        except Exception:  # noqa: BLE001
+            return
+        changed = False
+        for dev in self._devices:
+            entry = seen.get(str(dev.device_id))
+            if entry is None:
+                continue
+            latest = {k: dev.attributes.get(k) for k in self.PUSHED_ATTRIBUTES if dev.attributes.get(k) is not None}
+            if latest and latest != entry.get("last_attributes"):
+                entry["last_attributes"] = latest
+                changed = True
+        if changed:
+            try:
+                seen_file.write_text(json.dumps(seen, indent=2))
+            except OSError as exc:
+                log.warning("Could not write %s: %s", seen_file, exc)
+
+    def _attach_energy(self, endpoint: Any) -> bool:
+        """Give the endpoint an energy log if its appliance has a counter. Returns True if newly attached."""
+        from bridge.core.energy import EnergyLog
+
+        if endpoint.energy_log is not None:
+            return False
+        value = endpoint.energy_counter_kwh()
+        if value is None:
+            return False
+        endpoint.energy_log = EnergyLog(self.cfg.data_dir / "energy" / f"{endpoint.third_serial}.json")
+        endpoint.energy_log.record(value)
+        log.info("Energy metering enabled for %s (counter at %.2f kWh)", endpoint.name, value)
+        return True
+
+    # ----- gateway actions -----------------------------------------------------
+
+    async def sync(self) -> tuple[bool, str]:
+        assert self.client and self.registry
+        if not self.client.token:
+            return False, "no gateway token"
+        try:
+            mapping = await self.registry.sync()
+        except CubeAuthError as exc:
+            self.message = f"Gateway rejected the token ({exc}); press Get Token"
+            return False, self.message
+        except CubeError as exc:
+            self.message = f"Sync failed: {exc}"
+            return False, self.message
+        except Exception as exc:  # noqa: BLE001
+            self.message = f"Sync failed: {exc}"
+            log.exception("sync failed")
+            return False, self.message
+        # Endpoints that are offline right now must be reported as such; the
+        # gateway assumes online after a DiscoveryRequest.
+        for ep in self.registry.endpoints.values():
+            if not ep.online:
+                try:
+                    await self.client.report_online(mapping.get(ep.third_serial) or self.registry.serial_of(ep) or "", ep.third_serial, False)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("offline report failed: %s", exc)
+        self.message = f"Synced {len(mapping)} device(s) with the gateway"
+        await self._ensure_cards()
+        return True, self.message
+
+    async def _ensure_cards(self) -> None:
+        """Register the bridge's custom UI cards on the gateway (idempotent)."""
+        from bridge.cards.heatpump import CARD_LABEL, card_data
+        from bridge.cards.heatpump import CardRegistrar
+
+        assert self.client and self.registry
+        if not self.cfg.cards.heatpump or not card_data(self.registry.endpoints).get("found"):
+            return
+        base = await self._public_base_url()
+        try:
+            await CardRegistrar(self.client, self.cfg.data_dir).ensure(CARD_LABEL, base, "/cards/heatpump", "/cards/heatpump/drawer")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not register the heat pump card: %s", exc)
+
+    async def _public_base_url(self) -> str:
+        """Address a browser on the LAN can use to reach this bridge (for card iframes)."""
+        cfg = self.cfg.cube
+        host = cfg.public_host
+        if not host:
+            if cfg.host in LOCAL_GATEWAY_NAMES:
+                try:
+                    host = (await self.client.bridge_info()).get("ip") if self.client else None  # add-on: the gateway's own IP
+                except Exception:  # noqa: BLE001
+                    host = None
+            host = host or _local_ip_towards(cfg.host if cfg.host not in LOCAL_GATEWAY_NAMES else "8.8.8.8")
+        return f"http://{host}:{cfg.port}"
+
+    def request_token(self) -> bool:
+        """Start polling the gateway for a token; returns False if already polling."""
+        if self._token_task and not self._token_task.done():
+            return False
+        self._token_task = asyncio.ensure_future(self._token_flow())
+        return True
+
+    async def _token_flow(self) -> None:
+        assert self.client
+        self.message = "Waiting for you to press Allow on the iHost (5 minutes)"
+        log.info(self.message)
+        if await self.client.wait_for_token():
+            await self.sync()
+        else:
+            self.message = "Timed out waiting for the token; press Get Token again"
+            log.warning(self.message)
+
+    def status(self) -> dict[str, Any]:
+        assert self.client and self.registry
+        return {
+            "version": __version__,
+            "message": self.message,
+            "cube": {
+                "host": self.client.host,
+                "service_address": self.registry.service_address,
+                "token_valid": self.client.token_valid,
+                "has_token": bool(self.client.token),
+                "waiting_for_token": bool(self._token_task and not self._token_task.done()),
+                "last_error": self.client.last_error or self.registry.last_sync_error,
+                "synced": self.registry.synced,
+            },
+            "endpoints": self.registry.status(),
+        }
+
+    async def debug_query(self, device_id: int, body_type: int) -> str:
+        """Send a raw read-only query with the given body type to a Midea device (protocol exploration).
+
+        The reply, if any, shows up in the log as a `process message <hex>` line for that device.
+        """
+        from midealocal.devices.c3.message import MessageQuery
+        from midealocal.message import ListTypes
+
+        device = next((d for d in self._devices if d.device_id == device_id), None)
+        if device is None:
+            raise ValueError(f"no device {device_id}")
+        cmd = MessageQuery(device._message_protocol_version, ListTypes(body_type))  # noqa: SLF001
+        await asyncio.get_running_loop().run_in_executor(None, device.build_send, cmd)
+        return f"sent query body_type=0x{body_type:02X} to {device.name}"
+
+    def raw_attributes(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for dev in self._devices:
+            out[f"{dev.name} ({dev.device_type.name} {dev.device_id})"] = {
+                "model": dev.model,
+                "available": dev.available,
+                "attributes": dict(dev.attributes),
+            }
+        return out
+
+    # ----- Midea -----------------------------------------------------------------
+
+    async def _setup_midea(self) -> None:
+        from bridge.midea import make_endpoints
+        from bridge.midea.common import build_device, connect_device, discover_devices, load_keys, type_name
+
+        assert self.registry
+        cfg = self.cfg.midea
+        loop = asyncio.get_running_loop()
+
+        keys: dict[int, tuple[str, str]] = {}
+        if cfg.keys_file and cfg.keys_file.is_file():
+            keys = load_keys(cfg.keys_file)
+            log.info("Loaded Midea keys for %d device(s) from %s", len(keys), cfg.keys_file)
+        else:
+            log.error("Midea key file not found at %s; run `midealocal discover` with your account once and copy midea-devices.json there", cfg.keys_file)
+
+        infos: dict[int, dict[str, Any]] = {}
+        if cfg.discover:
+            log.info("Discovering Midea devices on the LAN...")
+            infos = await loop.run_in_executor(None, discover_devices)
+        for static in cfg.devices:
+            if static.device_id not in infos and static.ip:
+                infos.update(await loop.run_in_executor(None, discover_devices, [static.ip]))
+        log.info("Midea discovery found %d device(s)", len(infos))
+
+        # A unit that missed one discovery broadcast must not vanish from the gateway: fall back to
+        # what we saw last time and let the device thread keep retrying the connection.
+        seen_file = self.cfg.data_dir / "midea-seen.json"
+        seen: dict[str, dict[str, Any]] = {}
+        try:
+            seen = json.loads(seen_file.read_text())
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not read %s: %s", seen_file, exc)
+        for device_id, info in list(seen.items()):
+            did = int(device_id)
+            if did in infos or did not in keys:
+                continue
+            retry = await loop.run_in_executor(None, discover_devices, [info.get("ip_address")]) if info.get("ip_address") else {}
+            if did in retry:
+                infos[did] = retry[did]
+                log.info("Midea %s answered a targeted probe at its last address", device_id)
+            else:
+                infos[did] = dict(info)
+                log.warning("Midea %s did not answer discovery; using its last known address %s", device_id, info.get("ip_address"))
+        for did, info in infos.items():
+            seen[str(did)] = {k: v for k, v in info.items() if isinstance(v, (str, int, float, bool)) or v is None}
+        try:
+            seen_file.write_text(json.dumps(seen, indent=2))
+        except OSError as exc:
+            log.warning("Could not write %s: %s", seen_file, exc)
+
+        for device_id, info in infos.items():
+            tk = keys.get(device_id)
+            label = f"{type_name(info)} {device_id} at {info.get('ip_address')}"
+            if not tk:
+                log.warning("No token/key for Midea %s; skipping", label)
+                continue
+            override = cfg.device_config(device_id)
+            name = (override.name if override and override.name else None) or f"Midea {type_name(info)} {info.get('model') or device_id}"
+            device = build_device(info, tk[0], tk[1], name)
+            if device is None:
+                log.info("Unsupported Midea device type for %s; skipping", label)
+                continue
+            online = await loop.run_in_executor(None, connect_device, device)
+            # Values the unit only pushes on its own schedule (hourly energy report): start from the
+            # last ones we saw so the dependent endpoints exist right away instead of an hour later.
+            for key, value in (seen.get(str(device_id), {}).get("last_attributes") or {}).items():
+                if device.attributes.get(key) is None:
+                    device._attributes[key] = value  # noqa: SLF001
+            endpoints = make_endpoints(device, name)
+            if not endpoints:
+                log.info("No endpoints produced for %s", label)
+                continue
+            for ep in endpoints:
+                ep.online = online
+                self._attach_energy(ep)
+                self.registry.add(ep)
+            # Some data only arrives later (pushed energy reports, late sensors): grow the endpoint set as it does.
+            device.register_update(lambda status, dev=device, nm=name: self._schedule_late_endpoints(dev, nm))
+            device.open()  # background thread: keeps the socket alive and polls status
+            self._devices.append(device)
+            log.info("Midea %s ready as '%s' (%s)", label, name, "online" if online else "offline, will retry")
+
+    def _schedule_late_endpoints(self, device: Any, name: str) -> None:
+        # Called from the device thread.
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._add_late_endpoints(device, name)))
+        except RuntimeError:
+            pass
+
+    async def _add_late_endpoints(self, device: Any, name: str) -> None:
+        from bridge.midea import make_endpoints
+
+        assert self.registry
+        if self._late_sync_running:
+            return
+        new = make_endpoints(device, name, existing=set(self.registry.endpoints))
+        # Existing endpoints whose energy counter has just started reporting need the capability added too.
+        gained_energy = [
+            ep for ep in self.registry.endpoints.values()
+            if getattr(ep, "device", None) is device and self._attach_energy(ep)
+        ]
+        if not new and not gained_energy:
+            return
+        self._late_sync_running = True
+        try:
+            for ep in new:
+                ep.online = bool(device.available)
+                self._attach_energy(ep)
+                self.registry.add(ep)
+                log.info("Endpoint created from data that arrived after startup: %s", ep.name)
+            if self.client and self.client.token:
+                await self.sync()
+        finally:
+            self._late_sync_running = False
+
+
+def _local_ip_towards(host: str) -> str:
+    """The local interface address used to reach `host` (no packets are sent)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((host, 80))
+        return s.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+    finally:
+        s.close()

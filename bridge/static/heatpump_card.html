@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heat pump</title>
+<style>
+  /* The iHost home page is light; the iframe must not follow the OS dark-mode setting. ?theme=dark opts in. */
+  :root { --fg: #1c1c1e; --muted: #6e6e73; --accent: #2f6fed; --warm: #e8732a; --ok: #1a9a4a; --chip: rgba(128,128,128,.12); }
+  :root[data-theme="dark"] { --fg: #f2f2f7; --muted: #a1a1aa; --chip: rgba(255,255,255,.1); }
+  html, body { margin: 0; height: 100%; background: transparent; color: var(--fg); font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  .card { height: 100%; box-sizing: border-box; padding: 12px 14px; display: flex; align-items: center; gap: 12px; }
+  .icon { width: 46px; height: 46px; flex: none; border-radius: 50%; background: rgba(47,111,237,.12); display: grid; place-items: center; color: var(--accent); }
+  .icon.heating { background: rgba(232,115,42,.14); color: var(--warm); }
+  .icon svg { width: 28px; height: 28px; }
+  .main { flex: 1; min-width: 0; }
+  .title { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .big { font-size: 26px; font-weight: 700; line-height: 1.1; margin-top: 2px; white-space: nowrap; }
+  .big small { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 6px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .pill { font-size: 11px; color: var(--muted); background: var(--chip); padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill.on { color: var(--ok); background: rgba(26,154,74,.12); }
+  .pill.warm { color: var(--warm); background: rgba(232,115,42,.12); }
+  .compact .row, .compact .title { display: none; }
+  .compact .card { flex-direction: column; justify-content: center; gap: 6px; text-align: center; padding: 8px; }
+  .compact .big { font-size: 22px; }
+  .offline { opacity: .55; }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div class="icon" id="icon">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2.5" y="6" width="19" height="13" rx="2.5"/>
+      <circle cx="9.5" cy="12.5" r="4"/>
+      <circle cx="9.5" cy="12.5" r="0.6" fill="currentColor"/>
+      <path d="M9.5 8.5v2.2M13.3 12.5h-2.2M9.5 16.5v-2.2M5.7 12.5h2.2"/>
+      <path d="M16.5 9.5v6M19 9.5v6"/>
+      <path d="M7 3.5c.6-.8 1.4-.8 2 0s1.4.8 2 0M12.5 3.5c.6-.8 1.4-.8 2 0s1.4.8 2 0"/>
+    </svg>
+  </div>
+  <div class="main">
+    <div class="title" id="title">Heat pump</div>
+    <div class="big"><span id="target">–</span><small id="sub"></small></div>
+    <div class="row" id="pills"></div>
+  </div>
+</div>
+<script>
+  const params = new URLSearchParams(location.search);
+  if (params.get('size') === '1x1') document.body.classList.add('compact');
+  if (params.get('theme') === 'dark') document.documentElement.dataset.theme = 'dark';
+  function pill(text, cls) { return `<span class="pill ${cls || ''}">${text}</span>`; }
+  async function refresh() {
+    try {
+      const d = await (await fetch('/api/cards/heatpump', {cache: 'no-store'})).json();
+      if (!d.found) { document.getElementById('title').textContent = 'Heat pump not found'; return; }
+      document.getElementById('card').classList.toggle('offline', !d.online);
+      document.getElementById('title').textContent = d.name;
+      const t = d.zone.target;
+      document.getElementById('target').textContent = t == null ? '–' : `${Math.round(t)}°`;
+      const parts = [];
+      if (d.outdoor != null) parts.push(`outdoor ${d.outdoor.toFixed(1)}°`);
+      if (d.zone.supply != null) parts.push(`flow ${d.zone.supply.toFixed(0)}°`);
+      document.getElementById('sub').textContent = parts.join(' · ');
+      const icon = document.getElementById('icon');
+      icon.classList.toggle('heating', !!d.status.heating);
+      const pills = [];
+      pills.push(d.zone.power ? pill(d.status.heating ? 'Heating' : (d.mode === 'cooling' ? 'Cooling' : 'Zone on'), d.status.heating ? 'warm' : 'on') : pill('Zone off'));
+      if (d.dhw) pills.push(d.dhw.power ? pill(`Hot water ${d.dhw.tank != null ? d.dhw.tank.toFixed(0) + '°' : ''}`, d.status.dhw ? 'warm' : 'on') : pill(`Tank ${d.dhw.tank != null ? d.dhw.tank.toFixed(0) + '°' : 'off'}`));
+      if (d.energy && d.energy.today_kwh != null) pills.push(pill(`Today ${d.energy.today_kwh.toFixed(1)} kWh`));
+      if (d.status.eco) pills.push(pill('ECO', 'on'));
+      if (d.status.error_code) pills.push(pill(`Error ${d.status.error_code}`, 'warm'));
+      document.getElementById('pills').innerHTML = pills.join('');
+    } catch (e) { document.getElementById('sub').textContent = 'bridge unreachable'; }
+  }
+  refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>
