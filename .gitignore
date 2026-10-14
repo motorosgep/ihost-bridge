@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+*.egg-info/
+build/
+dist/
+# device credentials and tokens: never commit
+midea-devices*.json
+cube_token.json
+config.yaml
+.DS_Store

@@ -1,0 +1,30 @@
+# ihost-bridge configuration. Copy to data/config.yaml (or /data/config.yaml in the add-on).
+# Every value can also be set through environment variables, noted in the comments.
+
+log_level: INFO                 # LOG_LEVEL
+
+cube:
+  host: ihost                   # CUBE_HOST. Inside the iHost add-on "ihost" resolves to the gateway.
+                                # When running the bridge on another machine use the iHost IP, e.g. 192.168.68.55
+  app_name: ihost-bridge        # CUBE_APP_NAME, shown in the iHost token prompt
+  service_host: null            # CUBE_SERVICE_HOST. Host the iHost calls back for commands.
+                                # null = "ihost" when host is ihost, otherwise this machine's LAN IP.
+  public_host: null             # CUBE_PUBLIC_HOST. Address browsers use to load the bridge's UI cards.
+                                # null = the iHost's IP when running as an add-on, otherwise this machine's LAN IP.
+  port: 9900                    # BRIDGE_PORT for the web UI and the callback endpoint
+
+cards:
+  heatpump: false               # optional: also register a custom "Heat pump" tile (shown under Custom Tiles)
+
+midea:
+  enabled: true
+  keys_file: null               # MIDEA_KEYS_FILE. null = <data dir>/midea-devices.json
+                                # Format is the midea-local cache: {"devices": [{"device_id": "...", "token": "...", "key": "..."}]}
+  discover: true                # broadcast on the LAN at startup to find units and their current IPs
+  devices:                      # optional overrides, matched by device_id
+    - device_id: 153931628306230
+      name: Living room AC
+    - device_id: 142936511687395
+      name: Bedroom AC
+    - device_id: 146235046584760
+      name: Heat pump

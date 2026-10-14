@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heat pump</title>
+<style>
+  /* The iHost UI is light; do not follow the OS dark-mode setting. ?theme=dark opts in. */
+  :root { --fg: #1c1c1e; --muted: #6e6e73; --accent: #2f6fed; --warm: #e8732a; --ok: #1a9a4a; --line: rgba(128,128,128,.25); --chip: rgba(128,128,128,.1); }
+  :root[data-theme="dark"] { --fg: #f2f2f7; --muted: #a1a1aa; --chip: rgba(255,255,255,.08); }
+  html, body { margin: 0; background: transparent; color: var(--fg); font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 16px; max-width: 32rem; margin: 0 auto; box-sizing: border-box; }
+  h1 { font-size: 1.15rem; margin: 0 0 .25rem; }
+  .muted { color: var(--muted); font-size: .85rem; }
+  section { border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin: 12px 0; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .head strong { font-size: 1rem; }
+  .switch { position: relative; width: 46px; height: 26px; border-radius: 13px; background: #c7c7cc; border: 0; cursor: pointer; transition: background .2s; flex: none; }
+  .switch.on { background: var(--ok); }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: left .2s; }
+  .switch.on::after { left: 23px; }
+  .setpoint { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
+  .setpoint .value { font-size: 2rem; font-weight: 700; }
+  .setpoint .value small { font-size: .9rem; color: var(--muted); font-weight: 500; margin-left: 4px; }
+  .stepper button { width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: var(--chip); color: var(--fg); font-size: 1.3rem; cursor: pointer; margin-left: 8px; }
+  .stepper button:disabled { opacity: .4; cursor: default; }
+  dl { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; margin: 0; font-size: .92rem; }
+  dt { color: var(--muted); } dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .ok { color: var(--ok); } .warm { color: var(--warm); }
+  #msg { min-height: 1.2em; font-size: .85rem; color: var(--muted); }
+  .busy { opacity: .6; pointer-events: none; }
+</style>
+</head>
+<body>
+<h1 id="title">Heat pump</h1>
+<div class="muted" id="subtitle">Loading…</div>
+
+<section id="zone">
+  <div class="head"><strong>Heating zone 1</strong><button class="switch" id="zone-switch" aria-label="Zone on/off"></button></div>
+  <div class="setpoint">
+    <div class="value"><span id="zone-target">–</span><small id="zone-kind">target</small></div>
+    <div class="stepper"><button id="zone-minus">−</button><button id="zone-plus">+</button></div>
+  </div>
+</section>
+
+<section id="dhw" hidden>
+  <div class="head"><strong>Hot water</strong><button class="switch" id="dhw-switch" aria-label="Hot water on/off"></button></div>
+  <div class="setpoint">
+    <div class="value"><span id="dhw-target">–</span><small>target · tank <span id="dhw-tank">–</span></small></div>
+    <div class="stepper"><button id="dhw-minus">−</button><button id="dhw-plus">+</button></div>
+  </div>
+</section>
+
+<section>
+  <dl id="facts"></dl>
+</section>
+<div id="msg"></div>
+
+<script>
+  let data = null, pending = {};
+  const $ = id => document.getElementById(id);
+  if (new URLSearchParams(location.search).get('theme') === 'dark') document.documentElement.dataset.theme = 'dark';
+  function fmt(v, unit) { return v == null ? '–' : `${Number(v).toFixed(unit === '°' ? 0 : 1)}${unit || ''}`; }
+
+  async function refresh() {
+    try {
+      data = await (await fetch('/api/cards/heatpump', {cache: 'no-store'})).json();
+    } catch (e) { $('subtitle').textContent = 'Bridge unreachable'; return; }
+    if (!data.found) { $('subtitle').textContent = 'No heat pump registered'; return; }
+    $('title').textContent = data.name;
+    $('subtitle').textContent = `${data.online ? 'Online' : 'Offline'} · mode ${data.mode} · updated ${data.updated}`;
+    $('zone-switch').classList.toggle('on', data.zone.power);
+    $('zone-target').textContent = fmt(pending.zone ?? data.zone.target, '°');
+    $('zone-kind').textContent = data.zone.water_mode ? 'flow target' : 'room target';
+    if (data.dhw) {
+      $('dhw').hidden = false;
+      $('dhw-switch').classList.toggle('on', data.dhw.power);
+      $('dhw-target').textContent = fmt(pending.dhw ?? data.dhw.target, '°');
+      $('dhw-tank').textContent = fmt(data.dhw.tank, '°');
+    }
+    const s = data.status, e = data.energy || {};
+    const facts = [
+      ['Outdoor temperature', fmt(data.outdoor, ' °C')],
+      ['Flow temperature', fmt(data.zone.supply, ' °C')],
+      ['Compressor', s.heating ? '<span class="warm">heating</span>' : (s.dhw ? '<span class="warm">hot water</span>' : 'idle')],
+      ['Backup heater', s.backup_heater ? '<span class="warm">on</span>' : 'off'],
+      ['ECO · Silent', `${s.eco ? 'on' : 'off'} · ${s.silent ? 'on' : 'off'}`],
+      ['Consumption today', e.today_kwh != null ? `${e.today_kwh.toFixed(2)} kWh` : '– (collecting)'],
+      ['Consumed · produced (lifetime)', e.total_consumed_kwh != null ? `${Math.round(e.total_consumed_kwh)} · ${Math.round(e.total_produced_kwh || 0)} kWh` : '–'],
+      ['Error code', s.error_code ? `<span class="warm">${s.error_code}</span>` : 'none'],
+    ];
+    $('facts').innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  }
+
+  async function control(serial, state, label) {
+    document.body.classList.add('busy');
+    $('msg').textContent = `Sending: ${label}…`;
+    try {
+      const r = await (await fetch('/api/control', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({third_serial: serial, state})})).json();
+      $('msg').textContent = r.ok ? `${label}: sent` : `${label}: ${r.error}`;
+    } catch (e) { $('msg').textContent = `${label}: failed (${e})`; }
+    document.body.classList.remove('busy');
+    setTimeout(refresh, 1500);
+  }
+
+  // setpoint stepping is debounced so a few quick taps send one command
+  const timers = {};
+  function step(kind, delta) {
+    const src = kind === 'zone' ? data.zone : data.dhw;
+    const cur = pending[kind] ?? src.target;
+    if (cur == null) return;
+    const next = Math.min(src.max, Math.max(src.min, cur + delta));
+    pending[kind] = next;
+    $(`${kind}-target`).textContent = fmt(next, '°');
+    clearTimeout(timers[kind]);
+    timers[kind] = setTimeout(() => {
+      const value = pending[kind]; delete pending[kind];
+      control(src.third_serial, {'thermostat-target-setpoint': {'manual-mode': {targetSetpoint: value}}}, `${kind === 'zone' ? 'zone' : 'hot water'} target ${value}°`);
+    }, 900);
+  }
+  $('zone-minus').onclick = () => step('zone', -1);
+  $('zone-plus').onclick = () => step('zone', 1);
+  $('dhw-minus').onclick = () => step('dhw', -1);
+  $('dhw-plus').onclick = () => step('dhw', 1);
+  $('zone-switch').onclick = () => control(data.zone.third_serial, {power: {powerState: data.zone.power ? 'off' : 'on'}}, data.zone.power ? 'zone off' : 'zone on');
+  $('dhw-switch').onclick = () => control(data.dhw.third_serial, {power: {powerState: data.dhw.power ? 'off' : 'on'}}, data.dhw.power ? 'hot water off' : 'hot water on');
+
+  refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>
