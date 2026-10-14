@@ -13,6 +13,8 @@ FROM python:3.12-slim
 LABEL org.opencontainers.image.title="ihost-bridge" \
       org.opencontainers.image.description="Bridge Midea and other appliances into a SONOFF iHost / eWeLink CUBE"
 WORKDIR /app
+# tzdata so a TZ environment variable (e.g. Europe/Budapest) gives local day boundaries for energy statistics
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
 
