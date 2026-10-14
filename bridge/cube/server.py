@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from bridge.history_api import history_routes
+
 if TYPE_CHECKING:
     from bridge.app import BridgeApp
 
@@ -18,6 +20,8 @@ log = logging.getLogger(__name__)
 def make_app(bridge: BridgeApp) -> web.Application:
     app = web.Application()
     app["bridge"] = bridge
+    app["recorder"] = bridge.recorder
+    app.add_routes(history_routes())
     app.add_routes(
         [
             web.post("/webhook", webhook),

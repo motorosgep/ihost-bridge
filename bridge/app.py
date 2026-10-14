@@ -33,6 +33,7 @@ class BridgeApp:
         self._devices: list[Any] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._late_sync_running = False
+        self.recorder: Any = None
 
     # ----- lifecycle ---------------------------------------------------------
 
@@ -48,14 +49,29 @@ class BridgeApp:
             if cfg.midea.enabled:
                 await self._setup_midea()
 
+            stop = asyncio.Event()
+            recorder_task: asyncio.Task[None] | None = None
+            if cfg.recorder.enabled:
+                from bridge.core.recorder import Recorder
+
+                self.recorder = Recorder(
+                    self.client,
+                    session,
+                    cfg.data_dir / "history.sqlite",
+                    snapshot_interval=cfg.recorder.snapshot_interval,
+                    retention_days=cfg.recorder.retention_days,
+                    energy_lookup=self._energy_log_for,
+                )
+
             runner = web.AppRunner(make_app(self))
             await runner.setup()
             await web.TCPSite(runner, "0.0.0.0", cfg.cube.port).start()
             log.info("ihost-bridge %s: web UI on port %d, gateway callback %s", __version__, cfg.cube.port, service_address)
 
             await self._initial_sync()
+            if self.recorder is not None:
+                recorder_task = asyncio.create_task(self.recorder.run(stop))
 
-            stop = asyncio.Event()
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 try:
@@ -70,12 +86,21 @@ class BridgeApp:
                         await self._housekeeping()
             finally:
                 log.info("Shutting down")
+                if recorder_task is not None:
+                    recorder_task.cancel()
                 for dev in self._devices:
                     try:
                         dev.close()
                     except Exception:  # noqa: BLE001
                         pass
                 await runner.cleanup()
+
+    def _energy_log_for(self, serial: str) -> Any:
+        """The bridge's own energy counter log for a gateway serial, if that device is one of ours."""
+        if not self.registry:
+            return None
+        endpoint = self.registry.endpoint_by_serial(serial)
+        return endpoint.energy_log if endpoint is not None else None
 
     def _service_address(self) -> str:
         cfg = self.cfg.cube
@@ -298,6 +323,7 @@ class BridgeApp:
                 "synced": self.registry.synced,
             },
             "endpoints": self.registry.status(),
+            "recorder": self.recorder.info() if self.recorder is not None else {"recorder": False},
         }
 
     async def debug_query(self, device_id: int, body_type: int) -> str:
