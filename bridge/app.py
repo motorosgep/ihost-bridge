@@ -373,7 +373,11 @@ class BridgeApp:
                 infos[did] = dict(info)
                 log.warning("Midea %s did not answer discovery; using its last known address %s", device_id, info.get("ip_address"))
         for did, info in infos.items():
-            seen[str(did)] = {k: v for k, v in info.items() if isinstance(v, (str, int, float, bool)) or v is None}
+            entry = {k: v for k, v in info.items() if isinstance(v, (str, int, float, bool)) or v is None}
+            previous = seen.get(str(did)) or {}
+            if previous.get("last_attributes"):
+                entry["last_attributes"] = previous["last_attributes"]  # keep the pushed values across runs
+            seen[str(did)] = entry
         try:
             seen_file.write_text(json.dumps(seen, indent=2))
         except OSError as exc:
