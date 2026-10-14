@@ -66,14 +66,21 @@ web console. The devices appear in the iHost within a few seconds.
 
 ## Run on the iHost as an add-on
 
-The image is built for `linux/arm/v7` (the iHost), `arm64` and `amd64` by the
-GitHub workflow and pushed to Docker Hub.
+The GitHub workflow builds the image for `linux/arm/v7` (the iHost), `arm64` and
+`amd64` on every push to `main` and publishes it to GitHub's container registry as
+`ghcr.io/<owner>/ihost-bridge:latest` (make the package public in the repository's
+package settings so the iHost can pull it without credentials). A Docker Hub mirror
+is pushed too when `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set.
 
-1. iHost web console: Docker, **Add**, **Add Add-on**, search for the image name,
-   **Add to list**, **Install**.
-2. **Run** with network mode `host` and a volume mapped to `/data`.
-3. Put `midea-devices.json` (and optionally `config.yaml`) into that volume.
-4. Open the add-on's **Web UI** tab, press **Get Token**, approve on the iHost.
+1. iHost web console: Docker, **Add**, **Add Repository**, enter the full image
+   path `ghcr.io/<owner>/ihost-bridge:latest`, then **Install**.
+2. **Run** it. Network mode must be `host`. Mapping a volume to `/data` keeps the
+   token, keys and energy history across re-installs.
+3. Open the add-on's **Web UI** tab (port 9900). In **Setup**, paste the contents of
+   your `midea-devices.json` and save; the appliances connect within seconds.
+   Optionally paste a `config.yaml` to give devices friendly names.
+4. Press **Get Token**, then **Allow** on the iHost's "Get eWeLink CUBE access
+   token" dialog. The devices appear in the iHost device list.
 
 Inside the add-on the gateway is reachable as `http://ihost`, which is the default.
 
