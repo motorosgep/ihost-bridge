@@ -13,6 +13,11 @@ cube:
                                 # null = the iHost's IP when running as an add-on, otherwise this machine's LAN IP.
   port: 9900                    # BRIDGE_PORT for the web UI and the callback endpoint
 
+recorder:                       # history for apps such as Butter (temperature, humidity, power, energy ...)
+  enabled: true                 # RECORDER_ENABLED
+  snapshot_interval: 900        # RECORDER_SNAPSHOT_INTERVAL, seconds between full device snapshots
+  retention_days: 400           # RECORDER_RETENTION_DAYS
+
 cards:
   heatpump: false               # optional: also register a custom "Heat pump" tile (shown under Custom Tiles)
 

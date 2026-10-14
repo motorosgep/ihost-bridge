@@ -87,6 +87,29 @@ is pushed too when `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set.
 
 Inside the add-on the gateway is reachable as `http://ihost`, which is the default.
 
+## History for Butter
+
+The gateway keeps sensor history for its own console but does not expose it
+through the Open API. The bridge therefore records every numeric reading it
+sees (temperature, humidity, power draw, battery, setpoints, on/off states) from
+the gateway's event stream into `history.sqlite` on its data volume, takes a full
+snapshot every 15 minutes, and serves it on the same port as the web UI:
+
+```
+GET /api/history                                   recorder status
+GET /api/history/metrics?serial=<hub serial>       metrics recorded for a device
+GET /api/history/samples?serial=&metric=temperature.temperature&from=&to=&resolution=3600
+GET /api/history/energy?serial=&from=&to=&resolution=3600
+```
+
+`from`/`to` take epoch seconds or ISO-8601; `resolution` buckets samples
+(avg/min/max) or returns raw points when omitted. Energy comes from the bridge's
+own counter log for its Midea appliances and is integrated from power readings
+for everything else. The [Butter](https://github.com/motorosgep/butter) app finds
+the recorder next to the hub automatically. Disable it with `recorder.enabled:
+false`; without Midea appliances you can run only the recorder with
+`python -m bridge.recorder_cli --host <gateway ip>`.
+
 ## Configuration
 
 See [config.example.yaml](config.example.yaml). Everything can also be set with

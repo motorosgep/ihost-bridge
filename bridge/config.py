@@ -46,11 +46,21 @@ class MideaConfig:
 
 
 @dataclass
+class RecorderConfig:
+    """History recorder for apps such as Butter: numeric readings from the gateway, kept in SQLite."""
+
+    enabled: bool = True
+    snapshot_interval: int = 900   # seconds between full device snapshots (keeps flat lines alive)
+    retention_days: int = 400
+
+
+@dataclass
 class Config:
     data_dir: Path
     cube: CubeConfig
     midea: MideaConfig
     cards: CardsConfig = field(default_factory=CardsConfig)
+    recorder: RecorderConfig = field(default_factory=RecorderConfig)
     log_level: str = "INFO"
 
 
@@ -96,11 +106,19 @@ def load(path: str | None = None) -> Config:
         devices=devices,
     )
 
+    r = raw.get("recorder") or {}
+    recorder = RecorderConfig(
+        enabled=str(_env("RECORDER_ENABLED", r.get("enabled", True))).lower() not in ("0", "false", "no"),
+        snapshot_interval=int(_env("RECORDER_SNAPSHOT_INTERVAL", r.get("snapshot_interval", 900))),
+        retention_days=int(_env("RECORDER_RETENTION_DAYS", r.get("retention_days", 400))),
+    )
+
     level = str(_env("LOG_LEVEL", raw.get("log_level", "INFO"))).upper()
     return Config(
         data_dir=data_dir,
         cube=cube,
         midea=midea,
         cards=cards,
+        recorder=recorder,
         log_level=level,
     )
