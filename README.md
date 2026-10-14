@@ -74,11 +74,14 @@ is pushed too when `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set.
 
 1. iHost web console: Docker, **Add**, **Add Repository**, enter the full image
    path `ghcr.io/<owner>/ihost-bridge:latest`, then **Install**.
-2. **Run** it. Network mode must be `host`. Mapping a volume to `/data` keeps the
-   token, keys and energy history across re-installs.
-3. Open the add-on's **Web UI** tab (port 9900). In **Setup**, paste the contents of
-   your `midea-devices.json` and save; the appliances connect within seconds.
-   Optionally paste a `config.yaml` to give devices friendly names.
+2. **Run** it. Set Network to `host`; create a volume (Docker, Volume, Create volume)
+   and map it to `/data` so the token, keys and energy history survive re-installs.
+   Optionally add an environment variable `TZ` (e.g. `Europe/Budapest`) so daily
+   energy totals use your local midnight.
+3. Open `http://<ihost-ip>:9900` (the link next to **Port** on the add-on's page).
+   In **Setup**, paste the contents of your `midea-devices.json` and save; the
+   appliances connect within seconds. Optionally paste a `config.yaml` to give
+   devices friendly names.
 4. Press **Get Token**, then **Allow** on the iHost's "Get eWeLink CUBE access
    token" dialog. The devices appear in the iHost device list.
 
