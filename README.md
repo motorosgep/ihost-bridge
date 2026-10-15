@@ -87,6 +87,13 @@ is pushed too when `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set.
 
 Inside the add-on the gateway is reachable as `http://ihost`, which is the default.
 
+## When the router hands out new addresses
+
+Inside the add-on the gateway is always `ihost`, so the bridge itself is
+unaffected. Appliances do get new addresses; when one stays offline for a few
+minutes the bridge rediscovers the LAN and reconnects, at most once every ten
+minutes. A DHCP reservation for each unit avoids the gap altogether.
+
 ## History for Butter
 
 The gateway keeps sensor history for its own console but does not expose it

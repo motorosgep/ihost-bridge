@@ -7,6 +7,7 @@ import json
 import logging
 import signal
 import socket
+import time
 from typing import Any
 
 import aiohttp
@@ -34,6 +35,8 @@ class BridgeApp:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._late_sync_running = False
         self.recorder: Any = None
+        self._offline_since: float | None = None
+        self._last_recovery = 0.0
 
     # ----- lifecycle ---------------------------------------------------------
 
@@ -129,6 +132,39 @@ class BridgeApp:
         self._remember_pushed_attributes()
         if self.client.token and self.client.token_valid and not self.registry.synced:
             await self.sync()
+        await self._recover_moved_appliances()
+
+    OFFLINE_GRACE = 240.0  # seconds an appliance may stay offline before we go looking for it
+    RECOVERY_INTERVAL = 600.0  # at most one LAN rediscovery per ten minutes
+
+    async def _recover_moved_appliances(self) -> None:
+        """Routers re-lease addresses; when appliances stay offline, look for them on the LAN again."""
+        assert self.registry
+        if not self.cfg.midea.enabled or not self._devices:
+            return
+        offline = [ep for ep in self.registry.endpoints.values() if getattr(ep, "device", None) is not None and not ep.online]
+        now = time.monotonic()
+        if not offline:
+            self._offline_since = None
+            return
+        if self._offline_since is None:
+            self._offline_since = now
+            return
+        if now - self._offline_since < self.OFFLINE_GRACE or now - self._last_recovery < self.RECOVERY_INTERVAL:
+            return
+        self._last_recovery = now
+        from bridge.midea.common import discover_devices
+
+        loop = asyncio.get_running_loop()
+        infos = await loop.run_in_executor(None, discover_devices)
+        current = {int(dev.device_id): getattr(dev, "ip_address", None) or getattr(dev, "_ip_address", None) for dev in self._devices}
+        moved = [did for did, info in infos.items() if int(did) in current and info.get("ip_address") and info["ip_address"] != current[int(did)]]
+        if not moved:
+            log.info("%d appliance(s) offline; LAN discovery found no address change", len(offline))
+            return
+        log.warning("Appliance(s) %s answer from a new address; reconnecting", moved)
+        await self.reload_midea()
+        self._offline_since = None
 
     PUSHED_ATTRIBUTES = ("outdoor_temperature", "total_energy_consumption", "total_produced_energy", "status_heating", "status_dhw")
 
