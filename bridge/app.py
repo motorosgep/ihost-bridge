@@ -222,14 +222,17 @@ class BridgeApp:
             self.message = f"Sync failed: {exc}"
             log.exception("sync failed")
             return False, self.message
-        # Endpoints that are offline right now must be reported as such; the
-        # gateway assumes online after a DiscoveryRequest.
+        # The gateway keeps the last online flag it was told, also across a new
+        # DiscoveryRequest, so report every endpoint's current state and push its values.
         for ep in self.registry.endpoints.values():
-            if not ep.online:
-                try:
-                    await self.client.report_online(mapping.get(ep.third_serial) or self.registry.serial_of(ep) or "", ep.third_serial, False)
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("offline report failed: %s", exc)
+            try:
+                await self.client.report_online(mapping.get(ep.third_serial) or self.registry.serial_of(ep) or "", ep.third_serial, ep.online)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("online report failed: %s", exc)
+        try:
+            await self.registry.report_all()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("state report after sync failed: %s", exc)
         self.message = f"Synced {len(mapping)} device(s) with the gateway"
         await self._ensure_cards()
         return True, self.message
