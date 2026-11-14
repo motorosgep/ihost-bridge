@@ -40,6 +40,7 @@ class BridgeApp:
         self._last_recovery = 0.0
         self.solar: Any = None
         self.deco: Any = None
+        self.room: Any = None
         self._gateway_ip: str | None = None
         self._hub_tokens: dict[str, float] = {}  # tokens apps showed us, and until when they count as checked
         from bridge.auth import SetupAuth
@@ -102,6 +103,10 @@ class BridgeApp:
                 recorder_task = asyncio.create_task(self.recorder.run(stop))
             solar_task = asyncio.create_task(self.solar.run(stop))
             deco_task = asyncio.create_task(self.deco.run(stop))
+            from bridge.climate.room import RoomControl
+
+            self.room = RoomControl(cfg.data_dir, self.client.list_devices, self._heat_zone)
+            room_task = asyncio.create_task(self.room.run(stop))
 
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -121,6 +126,7 @@ class BridgeApp:
                     recorder_task.cancel()
                 solar_task.cancel()
                 deco_task.cancel()
+                room_task.cancel()
                 for dev in self._devices:
                     try:
                         dev.close()
@@ -287,6 +293,14 @@ class BridgeApp:
             if ip:
                 out[str(ip)] = str(dev.name)
         return out
+
+    def _heat_zone(self) -> Any:
+        """The heat pump's space-heating zone (zone 1) endpoint, or None without a heat pump."""
+        from bridge.midea.heatpump import HeatPumpZoneEndpoint
+
+        if self.registry is None:
+            return None
+        return next((ep for ep in self.registry.endpoints.values() if isinstance(ep, HeatPumpZoneEndpoint) and ep.zone == 0), None)
 
     async def save_deco(self, body: dict[str, Any]) -> str:
         assert self.registry and self.deco
@@ -555,6 +569,7 @@ class BridgeApp:
             "recorder": self.recorder.info() if self.recorder is not None else {"recorder": False},
             "solar": self.solar.status() if self.solar is not None else None,
             "deco": self.deco.status() if self.deco is not None else None,
+            "room_control": self.room.view() if self.room is not None else None,
         }
 
     async def debug_query(self, device_id: int, body_type: int) -> str:

@@ -210,6 +210,26 @@ Uses [tplink-deco-api](https://github.com/roquerodrigo/tplink-deco-api), which
 needs Python 3.14. Tested against a fake Deco; the login handshake was checked
 against a Deco X20 on firmware 1.1.8.
 
+## Room control (heating from indoor sensors)
+
+For a heat pump on radiators in a house that overheats even at the lowest water
+temperature, the bridge can act as a room thermostat. It switches the heat
+pump's space heating (zone 1) on and off from the hub's indoor temperature
+sensors, and leaves hot water alone:
+
+- the room temperature is the average of the chosen sensors that reported in
+  the last half hour;
+- heating goes on at `target - 0.3°` and off at `target + 0.2°` (both adjustable);
+- once switched, heating stays on for at least 30 minutes, or off for at least 20,
+  to spare the compressor;
+- if no chosen sensor has reported for half an hour, heating goes on: the house
+  may get too warm, as before, but never cold;
+- switching room control off turns heating back on.
+
+It is off until an app switches it on (`GET`/`POST /api/climate`, with the
+gateway token; Butter has a Heating screen). Settings are kept in
+`room_control.json`.
+
 ## Configuration
 
 See [config.example.yaml](config.example.yaml). Everything can also be set with
@@ -228,6 +248,7 @@ bridge/
   midea/             Midea adapters (ac.py, heatpump.py) on top of midea-local
   solar/             Huawei FusionSolar: kiosk reader, Northbound API client, yield ledger, service
   deco/              TP-Link Deco: mesh reader, fixed-address reservations
+  climate/           room control: heat pump heating from indoor sensors
   network_api.py     /api/network routes (need the caller's gateway token)
   auth.py            setup PIN, sessions; with cube/server.py's guard, who may change things
   app.py             wiring and lifecycle

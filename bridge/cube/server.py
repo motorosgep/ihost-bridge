@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from bridge.history_api import history_routes
+from bridge.climate_api import climate_routes
 from bridge.network_api import network_routes
 from bridge.solar_api import solar_routes
 
@@ -45,7 +46,7 @@ async def guard(request: web.Request, handler):  # noqa: ANN001
     if path == "/webhook":
         if not bridge.webhook_source_ok(request.remote):
             return web.json_response({"error": "directives are accepted from the gateway only"}, status=403)
-    elif path not in OPEN_WRITES and not path.startswith("/api/network/"):
+    elif path not in OPEN_WRITES and not path.startswith("/api/network/") and path != "/api/climate":  # these check the token themselves
         if not await caller_allowed(request):
             return web.json_response(
                 {"ok": False, "error": "locked: enter the setup PIN on the bridge's web page (apps send their iHost access token)", "locked": True},
@@ -61,6 +62,7 @@ def make_app(bridge: BridgeApp) -> web.Application:
     app.add_routes(history_routes())
     app.add_routes(solar_routes())
     app.add_routes(network_routes())
+    app.add_routes(climate_routes())
     app.add_routes(
         [
             web.post("/webhook", webhook),
