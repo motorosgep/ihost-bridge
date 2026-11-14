@@ -117,11 +117,43 @@ the recorder next to the hub automatically. Disable it with `recorder.enabled:
 false`; without Midea appliances you can run only the recorder with
 `python -m bridge.recorder_cli --host <gateway ip>`.
 
+## Solar (Huawei FusionSolar)
+
+The bridge can read a Huawei solar plant and show it on the iHost as a sensor
+(output now, and the lifetime counter as energy statistics), usable in scenes
+like any other device. Fill it in under **Solar** on the bridge's web page:
+
+- **Kiosk link** (no account needed): in FusionSolar open your plant, choose
+  Kiosk view, switch it on and copy the link. The bridge reads it every five
+  minutes: output, today's curve, and the totals for the day, month, year and
+  lifetime.
+- **Northbound API account** (optional): a user name and system code created
+  under System > Company Management > Northbound Management, usually by the
+  installer. It adds the plant's history by day, month and year. Huawei allows
+  only a few history calls a day, so the bridge fetches one period every ten
+  minutes, newest first, and keeps what it has read in `solar.sqlite`; a plant
+  with a few years behind it takes some hours to fill in.
+
+Without the API account the bridge still builds a history, by writing down the
+kiosk's totals from the day it is set up. The settings are stored in
+`solar.json` in the data directory (the system code is never shown again), or
+can be given in `config.yaml` / the environment, see `config.example.yaml`.
+
+Apps read it from the bridge:
+
+```
+GET /api/solar                                     live figures, today's curve, which sources are set up
+GET /api/solar/history?span=day&year=2026&month=11 each day of a month, kWh
+GET /api/solar/history?span=month&year=2026        each month of a year
+GET /api/solar/history?span=year                   every year on record
+```
+
 ## Configuration
 
 See [config.example.yaml](config.example.yaml). Everything can also be set with
 environment variables: `CUBE_HOST`, `CUBE_SERVICE_HOST`, `BRIDGE_PORT`,
-`BRIDGE_DATA_DIR`, `MIDEA_KEYS_FILE`, `LOG_LEVEL`.
+`BRIDGE_DATA_DIR`, `MIDEA_KEYS_FILE`, `LOG_LEVEL`, `SOLAR_KIOSK_URL`,
+`SOLAR_API_USER`, `SOLAR_API_CODE`.
 
 ## Layout
 
@@ -132,6 +164,7 @@ bridge/
   core/endpoint.py   Endpoint base class and capability helpers
   core/registry.py   sync, change-only reporting, directive dispatch
   midea/             Midea adapters (ac.py, heatpump.py) on top of midea-local
+  solar/             Huawei FusionSolar: kiosk reader, Northbound API client, yield ledger, service
   app.py             wiring and lifecycle
 ```
 

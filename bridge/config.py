@@ -55,12 +55,26 @@ class RecorderConfig:
 
 
 @dataclass
+class SolarConfig:
+    """Huawei FusionSolar: a kiosk link for live figures, optionally a Northbound API account for history.
+    The setup page stores the same settings in <data dir>/solar.json, which wins over these."""
+
+    kiosk_url: str | None = None
+    name: str | None = None        # device name on the gateway; default "Solar <plant name>"
+    api_host: str | None = None    # default: the region's host, taken from the kiosk link
+    api_user: str | None = None
+    api_code: str | None = None
+    station_code: str | None = None  # only needed when the API account reads several plants
+
+
+@dataclass
 class Config:
     data_dir: Path
     cube: CubeConfig
     midea: MideaConfig
     cards: CardsConfig = field(default_factory=CardsConfig)
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
+    solar: SolarConfig = field(default_factory=SolarConfig)
     log_level: str = "INFO"
 
 
@@ -113,6 +127,17 @@ def load(path: str | None = None) -> Config:
         retention_days=int(_env("RECORDER_RETENTION_DAYS", r.get("retention_days", 400))),
     )
 
+    so = raw.get("solar") or {}
+    so_api = so.get("api") or {}
+    solar = SolarConfig(
+        kiosk_url=_env("SOLAR_KIOSK_URL", so.get("kiosk_url")),
+        name=so.get("name"),
+        api_host=_env("SOLAR_API_HOST", so_api.get("host")),
+        api_user=_env("SOLAR_API_USER", so_api.get("user_name")),
+        api_code=_env("SOLAR_API_CODE", so_api.get("system_code")),
+        station_code=_env("SOLAR_STATION_CODE", so_api.get("station_code")),
+    )
+
     level = str(_env("LOG_LEVEL", raw.get("log_level", "INFO"))).upper()
     return Config(
         data_dir=data_dir,
@@ -120,5 +145,6 @@ def load(path: str | None = None) -> Config:
         midea=midea,
         cards=cards,
         recorder=recorder,
+        solar=solar,
         log_level=level,
     )

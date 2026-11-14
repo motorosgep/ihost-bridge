@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ihost-bridge"
-version = "0.2.2"
-description = "Bridge non-eWeLink appliances (Midea AC, heat pump, ...) into a SONOFF iHost / eWeLink CUBE as native devices"
+version = "0.3.0"
+description = "Bridge non-eWeLink appliances (Midea AC, heat pump, Huawei solar, ...) into a SONOFF iHost / eWeLink CUBE as native devices"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

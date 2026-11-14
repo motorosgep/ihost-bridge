@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from bridge.history_api import history_routes
+from bridge.solar_api import solar_routes
 
 if TYPE_CHECKING:
     from bridge.app import BridgeApp
@@ -22,6 +23,7 @@ def make_app(bridge: BridgeApp) -> web.Application:
     app["bridge"] = bridge
     app["recorder"] = bridge.recorder
     app.add_routes(history_routes())
+    app.add_routes(solar_routes())
     app.add_routes(
         [
             web.post("/webhook", webhook),
@@ -232,7 +234,60 @@ INDEX_HTML = """<!doctype html>
   <div id="setup-msg" class="muted"></div>
 </div>
 
+<div class="card">
+  <div class="row"><strong>Solar</strong><span id="solar-state" class="pill">…</span></div>
+  <p class="muted">
+    Huawei FusionSolar. Paste the plant's <em>kiosk link</em> (FusionSolar: your plant, Kiosk view, switch on, copy link)
+    for live output; the plant then appears on the iHost as a sensor. Optionally add a <em>Northbound API</em> account
+    (System, Company Management, Northbound Management) for the full history by day, month and year. Without it the
+    bridge keeps its own history from today on.
+  </p>
+  <input id="solar-kiosk" style="width:100%;font:inherit;padding:.4rem" placeholder="https://…fusionsolar.huawei.com/…kiosk?kk=…">
+  <div class="row" style="margin:.5rem 0">
+    <input id="solar-user" style="font:inherit;padding:.4rem;flex:1" placeholder="API user name (optional)" autocomplete="off">
+    <input id="solar-code" type="password" style="font:inherit;padding:.4rem;flex:1" placeholder="System code (blank keeps the saved one)" autocomplete="new-password">
+  </div>
+  <div class="row" style="margin:.5rem 0">
+    <input id="solar-host" style="font:inherit;padding:.4rem;flex:1" placeholder="API host, e.g. eu5.fusionsolar.huawei.com">
+    <input id="solar-station" style="font:inherit;padding:.4rem;flex:1" placeholder="Plant code (only if the account reads several)">
+  </div>
+  <div class="row"><button class="primary" onclick="saveSolar()">Save solar</button></div>
+  <div id="solar-msg" class="muted" style="margin-top:.5rem"></div>
+</div>
+
 <script>
+let solarFilled = false;
+async function saveSolar() {
+  const v = id => document.getElementById(id).value.trim();
+  document.getElementById('solar-msg').textContent = 'Saving…';
+  const r = await fetch('/api/setup/solar', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+    kiosk_url: v('solar-kiosk'),
+    api: {user_name: v('solar-user'), system_code: v('solar-code'), host: v('solar-host'), station_code: v('solar-station')},
+  })});
+  const j = await r.json();
+  document.getElementById('solar-msg').textContent = j.ok ? j.message : ('Error: ' + j.error);
+  document.getElementById('solar-code').value = '';
+  refresh();
+}
+function showSolar(so) {
+  const st = document.getElementById('solar-state');
+  if (!so || (!so.kiosk_url && !so.api_user)) { st.textContent = 'not set up'; st.className = 'pill'; }
+  else {
+    const bad = so.kiosk_error || so.api_error;
+    st.textContent = (so.plant ? `${so.plant}: ${(so.power_kw || 0).toFixed(2)} kW, ${(so.today_kwh || 0).toFixed(1)} kWh today` : 'no reading yet') +
+      (so.api_user ? (so.api_error ? ' · API: ' + so.api_error : ` · API ok, ${so.days_on_record} days on record`) : ` · ${so.days_on_record} days on record`) +
+      (so.kiosk_error ? ' · kiosk: ' + so.kiosk_error : '');
+    st.className = 'pill ' + (bad ? 'bad' : 'ok');
+  }
+  if (so && !solarFilled) {
+    solarFilled = true;
+    document.getElementById('solar-kiosk').value = so.kiosk_url || '';
+    document.getElementById('solar-user').value = so.api_user || '';
+    document.getElementById('solar-host').value = so.api_user ? (so.api_host || '') : '';
+    document.getElementById('solar-host').placeholder = 'API host, default ' + (so.api_host || 'eu5.fusionsolar.huawei.com');
+    document.getElementById('solar-station').value = so.api_plant ? so.api_plant.code : '';
+  }
+}
 async function postText(url, text) {
   const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: text});
   const j = await r.json(); return j.ok ? j.message : ('Error: ' + (j.error || j.message));
@@ -255,6 +310,7 @@ async function refresh() {
     const st = document.getElementById('setup-state');
     st.textContent = s.setup.keys_present ? `${s.setup.appliances} appliance(s) configured` : 'no Midea key file yet';
     st.className = 'pill ' + (s.setup.keys_present ? 'ok' : 'bad');
+    showSolar(s.solar);
     const tb = document.querySelector('#devices tbody'); tb.innerHTML = '';
     for (const d of s.endpoints) {
       const tr = document.createElement('tr');

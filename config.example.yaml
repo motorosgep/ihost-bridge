@@ -18,6 +18,15 @@ recorder:                       # history for apps such as Butter (temperature, 
   snapshot_interval: 900        # RECORDER_SNAPSHOT_INTERVAL, seconds between full device snapshots
   retention_days: 400           # RECORDER_RETENTION_DAYS
 
+solar:                          # Huawei FusionSolar. Easier: fill these in on the bridge's web page (stored in solar.json)
+  kiosk_url: null               # SOLAR_KIOSK_URL. The plant's kiosk link: live output, shown on the iHost as a sensor
+  name: null                    # device name on the iHost; null = "Solar <plant name>"
+  api:                          # optional Northbound API account, for history by day, month and year
+    host: null                  # SOLAR_API_HOST. null = the region's host from the kiosk link, e.g. eu5.fusionsolar.huawei.com
+    user_name: null             # SOLAR_API_USER
+    system_code: null           # SOLAR_API_CODE. Prefer the environment variable or the web page over this file
+    station_code: null          # SOLAR_STATION_CODE. Only when the account reads several plants
+
 cards:
   heatpump: false               # optional: also register a custom "Heat pump" tile (shown under Custom Tiles)
 

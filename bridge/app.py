@@ -37,6 +37,7 @@ class BridgeApp:
         self.recorder: Any = None
         self._offline_since: float | None = None
         self._last_recovery = 0.0
+        self.solar: Any = None
 
     # ----- lifecycle ---------------------------------------------------------
 
@@ -51,6 +52,13 @@ class BridgeApp:
 
             if cfg.midea.enabled:
                 await self._setup_midea()
+
+            from bridge.solar.service import SolarService
+
+            self.solar = SolarService(session, cfg.data_dir, cfg.solar)
+            self.solar.on_endpoint_change = self._solar_endpoint_changed
+            if self.solar.configured:
+                await self.solar.tick()  # read the plant once now, so it is registered with the first sync
 
             stop = asyncio.Event()
             recorder_task: asyncio.Task[None] | None = None
@@ -74,6 +82,7 @@ class BridgeApp:
             await self._initial_sync()
             if self.recorder is not None:
                 recorder_task = asyncio.create_task(self.recorder.run(stop))
+            solar_task = asyncio.create_task(self.solar.run(stop))
 
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -91,6 +100,7 @@ class BridgeApp:
                 log.info("Shutting down")
                 if recorder_task is not None:
                     recorder_task.cancel()
+                solar_task.cancel()
                 for dev in self._devices:
                     try:
                         dev.close()
@@ -203,6 +213,37 @@ class BridgeApp:
         endpoint.energy_log.record(value)
         log.info("Energy metering enabled for %s (counter at %.2f kWh)", endpoint.name, value)
         return True
+
+    # ----- solar ---------------------------------------------------------------
+
+    async def _solar_endpoint_changed(self) -> None:
+        """Register the solar plant with the gateway when it appears, is replaced or gains its energy counter."""
+        assert self.registry and self.solar
+        endpoint = self.solar.endpoint
+        for ep in [ep for ep in self.registry.endpoints.values() if ep.manufacturer == "Huawei" and ep is not endpoint]:
+            self.registry.remove(ep.third_serial)
+        if endpoint is None:
+            return
+        self._attach_energy(endpoint)
+        if endpoint.third_serial not in self.registry.endpoints:
+            self.registry.add(endpoint)
+        if self._loop is not None and self.client and self.client.token and self.registry.synced:
+            await self.sync()
+
+    async def save_solar(self, body: dict[str, Any]) -> str:
+        assert self.registry and self.solar
+        self.solar.save_settings(body)
+        if not self.solar.sources["kiosk"] and self.solar.endpoint is not None:
+            self.registry.remove(self.solar.endpoint.third_serial)
+            self.solar.endpoint = None
+        await self.solar.tick(force=True)
+        st = self.solar.status()
+        parts = []
+        if self.solar.sources["kiosk"]:
+            parts.append(f"kiosk: {st['kiosk_error']}" if st["kiosk_error"] else f"kiosk: {st['plant']}, {st['power_kw'] or 0:.2f} kW now")
+        if self.solar.sources["api"]:
+            parts.append(f"API: {st['api_error']}" if st["api_error"] else f"API: reading history for {st['api_plant']['name'] if st['api_plant'] else 'the plant'}")
+        return "; ".join(parts) or "solar switched off"
 
     # ----- gateway actions -----------------------------------------------------
 
@@ -363,6 +404,7 @@ class BridgeApp:
             },
             "endpoints": self.registry.status(),
             "recorder": self.recorder.info() if self.recorder is not None else {"recorder": False},
+            "solar": self.solar.status() if self.solar is not None else None,
         }
 
     async def debug_query(self, device_id: int, body_type: int) -> str:
