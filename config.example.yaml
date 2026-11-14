@@ -27,6 +27,11 @@ solar:                          # Huawei FusionSolar. Easier: fill these in on t
     system_code: null           # SOLAR_API_CODE. Prefer the environment variable or the web page over this file
     station_code: null          # SOLAR_STATION_CODE. Only when the account reads several plants
 
+deco:                           # TP-Link Deco mesh. Easier: fill these in on the bridge's web page (stored in deco.json)
+  host: null                    # DECO_HOST. The main Deco's LAN address, e.g. 192.168.68.1
+  password: null                # DECO_PASSWORD. The Deco admin password; prefer the web page or the environment
+  name: null                    # name of the internet sensor on the iHost; null = "Internet"
+
 cards:
   heatpump: false               # optional: also register a custom "Heat pump" tile (shown under Custom Tiles)
 

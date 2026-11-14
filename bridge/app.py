@@ -38,6 +38,9 @@ class BridgeApp:
         self._offline_since: float | None = None
         self._last_recovery = 0.0
         self.solar: Any = None
+        self.deco: Any = None
+        self._gateway_ip: str | None = None
+        self._hub_tokens: dict[str, float] = {}  # tokens apps showed us, and until when they count as checked
 
     # ----- lifecycle ---------------------------------------------------------
 
@@ -59,6 +62,15 @@ class BridgeApp:
             self.solar.on_endpoint_change = self._solar_endpoint_changed
             if self.solar.configured:
                 await self.solar.tick()  # read the plant once now, so it is registered with the first sync
+
+            from bridge.deco.service import DecoService
+
+            self.deco = DecoService(cfg.data_dir, cfg.deco)
+            self.deco.on_endpoint_change = self._deco_endpoint_changed
+            self.deco.known_ips = self._known_ips
+            await self._learn_gateway_ip()
+            if self.deco.configured:
+                await self.deco.tick()  # read the mesh once now, so the internet sensor is registered with the first sync
 
             stop = asyncio.Event()
             recorder_task: asyncio.Task[None] | None = None
@@ -83,6 +95,7 @@ class BridgeApp:
             if self.recorder is not None:
                 recorder_task = asyncio.create_task(self.recorder.run(stop))
             solar_task = asyncio.create_task(self.solar.run(stop))
+            deco_task = asyncio.create_task(self.deco.run(stop))
 
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -101,6 +114,7 @@ class BridgeApp:
                 if recorder_task is not None:
                     recorder_task.cancel()
                 solar_task.cancel()
+                deco_task.cancel()
                 for dev in self._devices:
                     try:
                         dev.close()
@@ -143,6 +157,8 @@ class BridgeApp:
         if self.client.token and self.client.token_valid and not self.registry.synced:
             await self.sync()
         await self._recover_moved_appliances()
+        if self._gateway_ip is None:
+            await self._learn_gateway_ip()
 
     OFFLINE_GRACE = 240.0  # seconds an appliance may stay offline before we go looking for it
     RECOVERY_INTERVAL = 600.0  # at most one LAN rediscovery per ten minutes
@@ -244,6 +260,68 @@ class BridgeApp:
         if self.solar.sources["api"]:
             parts.append(f"API: {st['api_error']}" if st["api_error"] else f"API: reading history for {st['api_plant']['name'] if st['api_plant'] else 'the plant'}")
         return "; ".join(parts) or "solar switched off"
+
+    # ----- Deco ------------------------------------------------------------------
+
+    async def _learn_gateway_ip(self) -> None:
+        if not self.client:
+            return
+        try:
+            self._gateway_ip = (await self.client.bridge_info()).get("ip") or None
+        except Exception as exc:  # noqa: BLE001
+            log.debug("gateway info failed: %s", exc)
+
+    def _known_ips(self) -> dict[str, str]:
+        """Addresses of devices the bridge itself knows, so the network list can name them."""
+        out: dict[str, str] = {}
+        if self._gateway_ip:
+            out[self._gateway_ip] = "iHost"
+        for dev in self._devices:
+            ip = getattr(dev, "ip_address", None) or getattr(dev, "_ip_address", None)
+            if ip:
+                out[str(ip)] = str(dev.name)
+        return out
+
+    async def _deco_endpoint_changed(self) -> None:
+        assert self.registry and self.deco
+        endpoint = self.deco.endpoint
+        if endpoint is None:
+            return
+        if endpoint.third_serial not in self.registry.endpoints:
+            self.registry.add(endpoint)
+        if self._loop is not None and self.client and self.client.token and self.registry.synced:
+            await self.sync()
+
+    async def save_deco(self, body: dict[str, Any]) -> str:
+        assert self.registry and self.deco
+        self.deco.save_settings(body)
+        if not self.deco.configured:
+            if self.deco.endpoint is not None:
+                self.registry.remove(self.deco.endpoint.third_serial)
+                self.deco.endpoint = None
+            return "Deco switched off"
+        await self.deco.tick(force=True)
+        st = self.deco.status()
+        if st["error"]:
+            return f"saved; {st['error']}"
+        return f"connected: {st['units']} Deco unit(s), {st['clients_online']} client(s) online, {st['reservations']} reservation(s)"
+
+    HUB_TOKEN_TTL = 600.0
+
+    async def hub_token_ok(self, token: str | None) -> bool:
+        """Whether an app's gateway access token is genuine: the gateway itself is asked, and the answer
+        remembered for ten minutes. Apps that may see or change the network must hold one."""
+        if not token or not self.client:
+            return False
+        now = time.monotonic()
+        until = self._hub_tokens.get(token)
+        if until is not None and until > now:
+            return True
+        ok = await self.client.token_works(token)
+        if ok:
+            self._hub_tokens = {t: u for t, u in self._hub_tokens.items() if u > now}
+            self._hub_tokens[token] = now + self.HUB_TOKEN_TTL
+        return ok
 
     # ----- gateway actions -----------------------------------------------------
 
@@ -405,6 +483,7 @@ class BridgeApp:
             "endpoints": self.registry.status(),
             "recorder": self.recorder.info() if self.recorder is not None else {"recorder": False},
             "solar": self.solar.status() if self.solar is not None else None,
+            "deco": self.deco.status() if self.deco is not None else None,
         }
 
     async def debug_query(self, device_id: int, body_type: int) -> str:

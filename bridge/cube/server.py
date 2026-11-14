@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from bridge.history_api import history_routes
+from bridge.network_api import network_routes
 from bridge.solar_api import solar_routes
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ def make_app(bridge: BridgeApp) -> web.Application:
     app["recorder"] = bridge.recorder
     app.add_routes(history_routes())
     app.add_routes(solar_routes())
+    app.add_routes(network_routes())
     app.add_routes(
         [
             web.post("/webhook", webhook),
@@ -255,6 +257,48 @@ INDEX_HTML = """<!doctype html>
   <div id="solar-msg" class="muted" style="margin-top:.5rem"></div>
 </div>
 
+<div class="card">
+  <div class="row"><strong>Network</strong><span id="deco-state" class="pill">…</span></div>
+  <p class="muted">
+    TP-Link Deco. Enter the main Deco's address and the admin password (the one the Deco app asks for). The bridge
+    keeps one session open and reads the mesh once a minute; the internet connection appears on the iHost as a
+    sensor (closed while online). Apps paired with the iHost, such as Butter, then list the clients and can pin
+    fixed addresses. Signing in to the Deco's own web page signs the bridge out for a minute.
+  </p>
+  <div class="row" style="margin:.5rem 0">
+    <input id="deco-host" style="font:inherit;padding:.4rem;flex:1" placeholder="Deco address, e.g. 192.168.68.1" autocomplete="off">
+    <input id="deco-password" type="password" style="font:inherit;padding:.4rem;flex:1" placeholder="Admin password (blank keeps the saved one)" autocomplete="new-password">
+  </div>
+  <div class="row"><button class="primary" onclick="saveDeco()">Save and connect</button><button onclick="saveDeco(true)">Switch off</button></div>
+  <div id="deco-msg" class="muted" style="margin-top:.5rem"></div>
+</div>
+
+<script>
+let decoFilled = false;
+async function saveDeco(off) {
+  const v = id => document.getElementById(id).value;
+  document.getElementById('deco-msg').textContent = off ? 'Switching off…' : 'Connecting…';
+  const r = await fetch('/api/setup/deco', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(off ? {host: ''} : {host: v('deco-host').trim(), password: v('deco-password')})});
+  const j = await r.json();
+  document.getElementById('deco-msg').textContent = j.ok ? j.message : ('Error: ' + j.error);
+  document.getElementById('deco-password').value = '';
+  if (off) document.getElementById('deco-host').value = '';
+  refresh();
+}
+function showDeco(d) {
+  const st = document.getElementById('deco-state');
+  if (!d || !d.configured) { st.textContent = 'not set up'; st.className = 'pill'; }
+  else if (d.error) { st.textContent = d.error; st.className = 'pill bad'; }
+  else if (!d.fetched_at) { st.textContent = 'connecting…'; st.className = 'pill'; }
+  else {
+    st.textContent = `${d.units} Deco unit(s) · ${d.clients_online} client(s) online · ${d.reservations} fixed address(es) · internet ${d.internet ? 'up' : 'down'}`;
+    st.className = 'pill ' + (d.internet ? 'ok' : 'bad');
+  }
+  if (d && !decoFilled) { decoFilled = true; document.getElementById('deco-host').value = d.host || ''; }
+}
+</script>
+
 <script>
 let solarFilled = false;
 async function saveSolar() {
@@ -311,6 +355,7 @@ async function refresh() {
     st.textContent = s.setup.keys_present ? `${s.setup.appliances} appliance(s) configured` : 'no Midea key file yet';
     st.className = 'pill ' + (s.setup.keys_present ? 'ok' : 'bad');
     showSolar(s.solar);
+    showDeco(s.deco);
     const tb = document.querySelector('#devices tbody'); tb.innerHTML = '';
     for (const d of s.endpoints) {
       const tr = document.createElement('tr');

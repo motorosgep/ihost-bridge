@@ -14,7 +14,7 @@ and Butter gets a purpose-built card fed by the bridge directly.
 | Device | Route | Local? | Effort | Blocked on |
 | --- | --- | --- | --- | --- |
 | Sonoff Wi-Fi switch | eWeLink Smart Home add-on, already installed | LAN control | none | your eWeLink sign-in in the add-on |
-| TP-Link Deco | Deco's own web API | yes | S–M | Deco admin password |
+| TP-Link Deco | Deco's own web API | yes | built (0.4.0) | presence phones still to choose |
 | Tado thermostat | HomeKit over the Tado bridge (V3+) | yes | M | model, and the bridge not paired with Apple Home |
 | Bosch dishwasher | Home Connect cloud API | no | M | a Home Connect developer app |
 | LG fridge + WashTower | ThinQ Connect cloud API | no | M | your ThinQ personal access token |
@@ -30,7 +30,11 @@ some devices. Once synced it is an ordinary hub device for Butter.
 
 ## TP-Link Deco
 
-**Verified:** the Deco at 192.168.1.1 answers the legacy RSA login endpoints
+**Built in 0.4.0:** the mesh reader, the "Internet" contact sensor and fixed-address
+reservations (see the README); Butter has a Network screen. Presence sensors per
+phone, blocking and a guest Wi-Fi switch are not built yet.
+
+**Verified:** the Deco's LAN address answers the legacy RSA login endpoints
 (`/cgi-bin/luci/;stok=/login?form=keys` and `form=auth`), which is the flow the
 existing integrations use. Some 2026 firmware builds replaced that flow and
 break those integrations; yours has not.

@@ -68,6 +68,16 @@ class SolarConfig:
 
 
 @dataclass
+class DecoConfig:
+    """TP-Link Deco mesh. The setup page stores the same settings in <data dir>/deco.json, which wins over these."""
+
+    host: str | None = None        # the main Deco's LAN address, e.g. 192.168.68.1
+    password: str | None = None    # the Deco admin password (the one the Deco app asks for)
+    username: str = "admin"
+    name: str | None = None        # internet sensor name on the gateway; default "Internet"
+
+
+@dataclass
 class Config:
     data_dir: Path
     cube: CubeConfig
@@ -75,6 +85,7 @@ class Config:
     cards: CardsConfig = field(default_factory=CardsConfig)
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     solar: SolarConfig = field(default_factory=SolarConfig)
+    deco: DecoConfig = field(default_factory=DecoConfig)
     log_level: str = "INFO"
 
 
@@ -138,6 +149,14 @@ def load(path: str | None = None) -> Config:
         station_code=_env("SOLAR_STATION_CODE", so_api.get("station_code")),
     )
 
+    de = raw.get("deco") or {}
+    deco = DecoConfig(
+        host=_env("DECO_HOST", de.get("host")),
+        password=_env("DECO_PASSWORD", de.get("password")),
+        username=str(de.get("username") or "admin"),
+        name=de.get("name"),
+    )
+
     level = str(_env("LOG_LEVEL", raw.get("log_level", "INFO"))).upper()
     return Config(
         data_dir=data_dir,
@@ -146,5 +165,6 @@ def load(path: str | None = None) -> Config:
         cards=cards,
         recorder=recorder,
         solar=solar,
+        deco=deco,
         log_level=level,
     )

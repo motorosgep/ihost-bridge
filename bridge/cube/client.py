@@ -115,6 +115,16 @@ class CubeClient:
         self._check_rest(data)
         return data["data"]["device_list"]
 
+    async def token_works(self, token: str) -> bool:
+        """Whether the gateway accepts `token` (another app's, e.g. Butter's), checked with a device list."""
+        try:
+            async with self._session.get(f"{self.base}/devices", headers={"Authorization": f"Bearer {token}"}, timeout=TIMEOUT) as resp:
+                data = await resp.json(content_type=None)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("token check failed: %s", exc)
+            return False
+        return data.get("error") == 0
+
     async def delete_device(self, serial_number: str) -> None:
         async with self._session.delete(
             f"{self.base}/devices/{serial_number}", headers=self._headers(), timeout=TIMEOUT

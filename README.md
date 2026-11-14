@@ -92,7 +92,8 @@ Inside the add-on the gateway is reachable as `http://ihost`, which is the defau
 Inside the add-on the gateway is always `ihost`, so the bridge itself is
 unaffected. Appliances do get new addresses; when one stays offline for a few
 minutes the bridge rediscovers the LAN and reconnects, at most once every ten
-minutes. A DHCP reservation for each unit avoids the gap altogether.
+minutes. A DHCP reservation for each unit avoids the gap altogether; with a
+TP-Link Deco set up (below), Butter's Network screen pins them in one go.
 
 ## History for Butter
 
@@ -148,12 +149,50 @@ GET /api/solar/history?span=month&year=2026        each month of a year
 GET /api/solar/history?span=year                   every year on record
 ```
 
+## Network (TP-Link Deco)
+
+The bridge can read a TP-Link Deco mesh with the Deco's admin password (the one
+the Deco app asks for). Fill in the main Deco's address and the password under
+**Network** on the bridge's web page. It then:
+
+- keeps one admin session open and reads the Deco units, the clients (name,
+  address, wired or which band, which Deco) and the internet status once a
+  minute, and the fixed-address (DHCP reservation) table every five minutes;
+- shows the internet connection on the iHost as a contact sensor named
+  "Internet", closed while online and open when it is down, for scenes;
+- adds, changes and removes fixed addresses when an app asks, after checking
+  each one: inside the home network, not the Deco's own address, not held by
+  another device, and within the Deco's limit.
+
+The Deco allows one admin session at a time, so signing in to its web page signs
+the bridge out; it logs in again after a minute. If the Deco refuses the
+password the bridge stops trying (the Deco locks the login after a few wrong
+attempts) until the password is saved again. Changing the Deco address on the
+web page needs the password typed again. The settings are stored in `deco.json`
+in the data directory, readable only by the bridge, or can be given in
+`config.yaml` / `DECO_HOST` and `DECO_PASSWORD`.
+
+The network pages show who is home and change the router, so unlike the other
+pages they answer only apps paired with the iHost: send the gateway access token
+the app got when you pressed Allow, as `Authorization: Bearer <token>`. The
+bridge asks the gateway whether the token is genuine.
+
+```
+GET    /api/network                     internet, Deco units, clients, fixed addresses
+POST   /api/network/reservations        {"items": [{"mac": "...", "ip": "..."}]}
+DELETE /api/network/reservations/<mac>
+```
+
+Uses [tplink-deco-api](https://github.com/roquerodrigo/tplink-deco-api), which
+needs Python 3.14. Tested against a fake Deco; the login handshake was checked
+against a Deco X20 on firmware 1.1.8.
+
 ## Configuration
 
 See [config.example.yaml](config.example.yaml). Everything can also be set with
 environment variables: `CUBE_HOST`, `CUBE_SERVICE_HOST`, `BRIDGE_PORT`,
 `BRIDGE_DATA_DIR`, `MIDEA_KEYS_FILE`, `LOG_LEVEL`, `SOLAR_KIOSK_URL`,
-`SOLAR_API_USER`, `SOLAR_API_CODE`.
+`SOLAR_API_USER`, `SOLAR_API_CODE`, `DECO_HOST`, `DECO_PASSWORD`.
 
 ## Layout
 
@@ -165,6 +204,8 @@ bridge/
   core/registry.py   sync, change-only reporting, directive dispatch
   midea/             Midea adapters (ac.py, heatpump.py) on top of midea-local
   solar/             Huawei FusionSolar: kiosk reader, Northbound API client, yield ledger, service
+  deco/              TP-Link Deco: mesh reader, internet sensor, fixed-address reservations
+  network_api.py     /api/network routes (need the caller's gateway token)
   app.py             wiring and lifecycle
 ```
 
