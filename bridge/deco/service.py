@@ -26,6 +26,7 @@ from bridge.core.endpoint import Endpoint, cap
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 60            # clients, units and internet status
+PER_UNIT_INTERVAL = 300       # which Deco each client is on (one slow call per unit)
 RESERVATION_INTERVAL = 300    # the reservation table changes only when someone edits it
 MIN_LOGIN_GAP = 60            # never log in more often than this
 LOGIN_BACKOFF = 1800          # after three logins in a row fail for network reasons
@@ -120,6 +121,10 @@ class DecoService:
         self.snap = Snapshot()
         self._last_good = 0.0
         self._logged_access_host = False
+        self._logged_per_unit = False
+        self._per_unit_at = 0.0
+        self._unit_of: dict[str, Any] = {}
+        self._online_per_unit: set[str] = set()
         self.endpoint: InternetEndpoint | None = None
         self.on_endpoint_change: Callable[[], Awaitable[None]] | None = None
         # Filled in by the app: IP -> label for devices it knows (the gateway, Midea units).
@@ -182,14 +187,16 @@ class DecoService:
 
     # ----- talking to the Deco ------------------------------------------------------
 
-    async def _call(self, fn: Callable[[Any], Any]) -> Any:
+    async def _call(self, fn: Callable[[Any], Any], keep_session: bool = False) -> Any:
         """Run one SDK call in a worker thread (the SDK is synchronous), logging in first if needed.
-        A failed call drops the session; the next call logs in again, within the login limits."""
+        A failed call drops the session; the next call logs in again, within the login limits.
+        `keep_session` is for optional calls whose failure says nothing about the session."""
         client = await self._session()
         try:
             return await asyncio.to_thread(fn, client)
         except Exception:
-            self._client = None
+            if not keep_session:
+                self._client = None
             raise
 
     async def _session(self) -> Any:
@@ -258,9 +265,11 @@ class DecoService:
                 wan = await self._call(lambda c: c.get_wan_info())
                 if wan.lan.ip_info.ip and wan.lan.ip_info.mask:
                     snap.lan = {"ip": wan.lan.ip_info.ip, "mask": wan.lan.ip_info.mask}
-            # One list for the whole mesh: asking per Deco unit made an X20 (firmware 1.1.8) hang until
-            # the timeout. Each client names the Deco it is connected to in `access_host`.
+            # One list for the whole mesh (about 10 s on an X20 with 23 clients).
             clients = await self._call(lambda c: c.get_client_list())
+            if not self._logged_access_host:
+                await self._log_raw_summary()
+            per_unit = await self._per_unit_lists(units)
         except DecoUnavailable as exc:
             self.error = str(exc)
             return
@@ -284,15 +293,23 @@ class DecoService:
             for key in (unit.mac, unit.device_ip, _mac(unit.mac)):
                 if key:
                     by_unit[str(key).upper()] = unit
-        if not self._logged_access_host and clients:
-            self._logged_access_host = True
-            log.info("Deco: %d client(s); sample access_host %r, units %s", len(clients), clients[0].access_host, [u.mac for u in units])
+        if per_unit is not None:
+            self._unit_of = {}
+            self._online_per_unit = set()
+            for unit, listed in per_unit:
+                for client in listed:
+                    self._unit_of[_mac(client.mac)] = unit
+                    if client.online:
+                        self._online_per_unit.add(_mac(client.mac))
         for client in clients:
             if client.client_mesh:
                 continue  # another Deco unit, not a client
+            mac = _mac(client.mac)
             host = str(client.access_host or "").upper()
-            unit = by_unit.get(host) or by_unit.get(_mac(host).upper())
+            unit = self._unit_of.get(mac) or by_unit.get(host) or by_unit.get(_mac(host).upper())
             entry = _client(client, unit.mac if unit else "", _unit_name(unit) if unit else None)
+            if mac in self._online_per_unit:
+                entry["online"] = True  # a Deco unit lists it as connected
             seen_now.add(entry["mac"])
             snap.clients[entry["mac"]] = entry
         for mac, entry in list(snap.clients.items()):
@@ -301,6 +318,44 @@ class DecoService:
                 if snap.fetched_at - entry.get("last_seen", 0) > FORGET_AFTER:
                     del snap.clients[mac]
         await self._present(snap.internet["online"])
+
+    async def _log_raw_summary(self) -> None:
+        """Once per start: what the raw client records look like (field names, online flags, where they
+        connect), so the mapping can be checked on real hardware. No names or addresses are logged."""
+        from collections import Counter
+
+        self._logged_access_host = True
+        try:
+            raw = await self._call(lambda c: c.request("admin/client", "client_list", {"operation": "read", "params": {"device_mac": "default"}}), keep_session=True)
+        except Exception as exc:  # noqa: BLE001
+            log.info("Deco: raw client summary unavailable: %s", exc)
+            return
+        items = [i for i in (raw.get("client_list") or []) if isinstance(i, dict)]
+        keys = sorted({k for i in items for k in i})
+        summary = Counter((str(i.get("online")), str(i.get("access_host")), str(i.get("interface")), str(i.get("wire_type"))) for i in items)
+        log.info("Deco: raw client fields %s; (online, access_host, interface, wire_type) counts %s", keys, dict(summary))
+
+    async def _per_unit_lists(self, units: list[Any]) -> list[tuple[Any, list[Any]]] | None:
+        """Which Deco each client is on, asked per unit every few minutes (each call takes seconds).
+        None when it is not time yet or a unit did not answer; the last mapping then stays."""
+        now = time.time()
+        if now - self._per_unit_at < PER_UNIT_INTERVAL:
+            return None
+        self._per_unit_at = now
+        out: list[tuple[Any, list[Any]]] = []
+        for unit in units:
+            try:
+                started = time.monotonic()
+                listed = await self._call(lambda c, mac=unit.mac: c.get_client_list(mac.replace(":", "-")), keep_session=True)
+                if not self._logged_per_unit:
+                    log.info("Deco: unit %s lists %d client(s), %d online, in %.1f s", unit.mac[-5:], len(listed), sum(1 for x in listed if x.online), time.monotonic() - started)
+            except Exception as exc:  # noqa: BLE001
+                log.info("Deco: per-unit client list failed for %s (%s); using the mesh-wide list only", unit.mac[-5:], exc)
+                self._logged_per_unit = True
+                return None
+            out.append((unit, listed))
+        self._logged_per_unit = True
+        return out
 
     async def _read_reservations(self) -> None:
         try:
