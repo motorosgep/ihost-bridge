@@ -452,10 +452,26 @@ class DecoService:
         }
 
 
+# Deco firmware (seen on an X20, 1.1.8) offers only TLS 1.2 with RSA key exchange (AES128-GCM-SHA256),
+# which Python's default cipher list leaves out, so the handshake fails. Allow those ciphers for the Deco
+# only. The certificate is self-signed and not verified anyway; the payloads are also encrypted by the
+# Deco's own RSA+AES scheme.
+DECO_CIPHERS = "DEFAULT:AES128-GCM-SHA256:AES256-GCM-SHA384"
+
+
 def _sdk_client(host: str, username: str, password: str) -> Any:
     from tplink_deco_api import DecoClient
 
-    return DecoClient(host, username, password, timeout=10.0)
+    client = DecoClient(host, username, password, timeout=10.0)
+    ctx = getattr(getattr(client, "_transport", None), "_ssl_ctx", None)
+    if ctx is not None:
+        try:
+            ctx.set_ciphers(DECO_CIPHERS)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Deco: could not widen the TLS cipher list (%s); the login may fail", exc)
+    else:
+        log.warning("Deco: the SDK no longer exposes its TLS settings; the login may fail on older firmware")
+    return client
 
 
 def _unit_name(unit: Any) -> str:
