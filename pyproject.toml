@@ -12,7 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "aiohttp>=3.9",
     "pyyaml>=6",
-    "midea-local>=12",
+    "midea-local>=12.3,<13",  # 13+ made discovery async; bump together with bridge/midea/common.py
     "tplink-deco-api>=2.1.1",
 ]
 
