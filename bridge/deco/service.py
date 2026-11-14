@@ -119,6 +119,7 @@ class DecoService:
         self.error: str | None = None
         self.snap = Snapshot()
         self._last_good = 0.0
+        self._logged_access_host = False
         self.endpoint: InternetEndpoint | None = None
         self.on_endpoint_change: Callable[[], Awaitable[None]] | None = None
         # Filled in by the app: IP -> label for devices it knows (the gateway, Midea units).
@@ -257,10 +258,9 @@ class DecoService:
                 wan = await self._call(lambda c: c.get_wan_info())
                 if wan.lan.ip_info.ip and wan.lan.ip_info.mask:
                     snap.lan = {"ip": wan.lan.ip_info.ip, "mask": wan.lan.ip_info.mask}
-            # One list per Deco unit, so every client is tied to the Deco it is connected to.
-            per_unit: list[tuple[Any, list[Any]]] = []
-            for unit in units:
-                per_unit.append((unit, await self._call(lambda c, mac=unit.mac: c.get_client_list(mac.replace(":", "-")))))
+            # One list for the whole mesh: asking per Deco unit made an X20 (firmware 1.1.8) hang until
+            # the timeout. Each client names the Deco it is connected to in `access_host`.
+            clients = await self._call(lambda c: c.get_client_list())
         except DecoUnavailable as exc:
             self.error = str(exc)
             return
@@ -279,14 +279,22 @@ class DecoService:
             "connect_type": internet.ipv4.connect_type,
         }
         seen_now: set[str] = set()
-        for unit, clients in per_unit:
-            unit_name = _unit_name(unit)
-            for client in clients:
-                if client.client_mesh:
-                    continue  # another Deco unit, not a client
-                entry = _client(client, unit.mac, unit_name)
-                seen_now.add(entry["mac"])
-                snap.clients[entry["mac"]] = entry
+        by_unit = {}
+        for unit in units:
+            for key in (unit.mac, unit.device_ip, _mac(unit.mac)):
+                if key:
+                    by_unit[str(key).upper()] = unit
+        if not self._logged_access_host and clients:
+            self._logged_access_host = True
+            log.info("Deco: %d client(s); sample access_host %r, units %s", len(clients), clients[0].access_host, [u.mac for u in units])
+        for client in clients:
+            if client.client_mesh:
+                continue  # another Deco unit, not a client
+            host = str(client.access_host or "").upper()
+            unit = by_unit.get(host) or by_unit.get(_mac(host).upper())
+            entry = _client(client, unit.mac if unit else "", _unit_name(unit) if unit else None)
+            seen_now.add(entry["mac"])
+            snap.clients[entry["mac"]] = entry
         for mac, entry in list(snap.clients.items()):
             if mac not in seen_now:
                 entry["online"] = False
@@ -462,7 +470,7 @@ DECO_CIPHERS = "DEFAULT:AES128-GCM-SHA256:AES256-GCM-SHA384"
 def _sdk_client(host: str, username: str, password: str) -> Any:
     from tplink_deco_api import DecoClient
 
-    client = DecoClient(host, username, password, timeout=10.0)
+    client = DecoClient(host, username, password, timeout=30.0)  # the client list can take a while
     ctx = getattr(getattr(client, "_transport", None), "_ssl_ctx", None)
     if ctx is not None:
         try:
@@ -492,7 +500,7 @@ def _unit(unit: Any) -> dict[str, Any]:
     }
 
 
-def _client(client: Any, unit_mac: str, unit_name: str) -> dict[str, Any]:
+def _client(client: Any, unit_mac: str, unit_name: str | None) -> dict[str, Any]:
     wired = str(client.wire_type).lower() == "wired"
     return {
         "mac": _mac(client.mac),
@@ -501,7 +509,7 @@ def _client(client: Any, unit_mac: str, unit_name: str) -> dict[str, Any]:
         "online": bool(client.online),
         "wired": wired,
         "band": None if wired else client.connection_type or None,  # band2_4, band5, band6
-        "deco_mac": _mac(unit_mac),
+        "deco_mac": _mac(unit_mac) or None,
         "deco": unit_name,
         "client_type": client.client_type or None,
         # As the Deco reports them; the unit is not documented (the existing integrations treat it as bytes/s).
