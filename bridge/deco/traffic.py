@@ -5,7 +5,7 @@ every minute or two, so a burst shows up late and short ones may be missed).
 Each mesh read is recorded here:
 
 - the home's total rate, one sample per read, for the last 24 hours;
-- hourly averages and peaks for the last 30 days;
+- per hour for the last 30 days: average and peak rate, and the data moved;
 - per device, the data moved today and yesterday, estimated from the rates
   (rate times the time until the next read).
 
@@ -39,7 +39,7 @@ class TrafficLog:
         self.file = data_dir / "traffic.json"
         # [epoch s, down kB/s, up kB/s]
         self.samples: deque[list[float]] = deque()
-        # [hour start, down avg, up avg, down peak, up peak, samples]
+        # [hour start, down avg, up avg, down peak, up peak, samples, down kB, up kB]
         self.hours: list[list[float]] = []
         # day -> mac -> {"name", "deco", "down", "up"} in kB
         self.days: dict[str, dict[str, dict[str, Any]]] = {}
@@ -91,7 +91,7 @@ class TrafficLog:
         self.now = {"at": round(at), "down": down, "up": up, "decos": decos}
 
         # Volume: each device's rate holds until this read, at most MAX_GAP.
-        span = min(MAX_GAP, at - self._last_at) if self._last_at else 60.0
+        span = max(0.0, min(MAX_GAP, at - self._last_at)) if self._last_at else 60.0
         if span > 0:
             today = self.days.setdefault(_day(at), {})
             for c in clients:
@@ -113,15 +113,19 @@ class TrafficLog:
 
         hour = int(at // 3600 * 3600)
         if not self.hours or self.hours[-1][0] != hour:
-            self.hours.append([hour, 0.0, 0.0, 0, 0, 0])
+            self.hours.append([hour, 0.0, 0.0, 0, 0, 0, 0.0, 0.0])
             self.hours = self.hours[-KEEP_HOURS:]
         h = self.hours[-1]
+        if len(h) < 8:  # recorded by 0.4.2 before hours carried volumes
+            h.extend([0.0, 0.0])
         n = h[5]
         h[1] = round((h[1] * n + down) / (n + 1), 1)
         h[2] = round((h[2] * n + up) / (n + 1), 1)
         h[3] = max(h[3], down)
         h[4] = max(h[4], up)
         h[5] = n + 1
+        h[6] = round(h[6] + down * span, 1)
+        h[7] = round(h[7] + up * span, 1)
         self.save()
 
     # ----- reading --------------------------------------------------------------------------
@@ -145,7 +149,8 @@ class TrafficLog:
             "unit": "kB/s",
             "now": self.now,
             "samples": list(self.samples),
-            "hours": [h[:5] for h in self.hours],
+            # [hour start, down avg, up avg, down peak, up peak, down kB, up kB]
+            "hours": [h[:5] + (h[6:8] if len(h) >= 8 else [0, 0]) for h in self.hours],
             "today": self._day_view(_day(now)),
             "yesterday": self._day_view(_day(now - DAY)),
         }
