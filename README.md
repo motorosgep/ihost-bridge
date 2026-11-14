@@ -87,6 +87,27 @@ is pushed too when `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set.
 
 Inside the add-on the gateway is reachable as `http://ihost`, which is the default.
 
+## Who may change things
+
+Reading (status, history, solar) stays open on the home network. Everything that
+changes a device, the router or the bridge's settings needs one of:
+
+- the **setup PIN**: the first time the web page is opened after updating, it
+  asks you to choose one (at least 6 characters), and that browser stays
+  unlocked. Five wrong PINs lock the check for 5 minutes, doubling each time.
+  Forgot it? Press **Forgot PIN**, then **Allow** on the iHost (the same dialog as
+  Get Token); the PIN is cleared and the next visitor chooses a new one. It is
+  stored only as a salted hash in `setup_pin.json`.
+- an app's **iHost access token** (`Authorization: Bearer <token>`), the one the
+  app got when you pressed Allow on the iHost. Butter sends it; the bridge asks
+  the gateway whether it is genuine.
+
+Gateway directives (`/webhook`) carry no credentials, so the bridge accepts them
+only from the gateway's own addresses (loopback, the iHost's IP). If your setup
+routes them differently and devices stop responding, the log says
+"Refused a directive from …"; set `cube.webhook_any_source: true` (or
+`WEBHOOK_ANY_SOURCE=1`) to go back to accepting any address.
+
 ## When the router hands out new addresses
 
 Inside the add-on the gateway is always `ihost`, so the bridge itself is
@@ -192,7 +213,7 @@ against a Deco X20 on firmware 1.1.8.
 See [config.example.yaml](config.example.yaml). Everything can also be set with
 environment variables: `CUBE_HOST`, `CUBE_SERVICE_HOST`, `BRIDGE_PORT`,
 `BRIDGE_DATA_DIR`, `MIDEA_KEYS_FILE`, `LOG_LEVEL`, `SOLAR_KIOSK_URL`,
-`SOLAR_API_USER`, `SOLAR_API_CODE`, `DECO_HOST`, `DECO_PASSWORD`.
+`SOLAR_API_USER`, `SOLAR_API_CODE`, `DECO_HOST`, `DECO_PASSWORD`, `WEBHOOK_ANY_SOURCE`.
 
 ## Layout
 
@@ -206,6 +227,7 @@ bridge/
   solar/             Huawei FusionSolar: kiosk reader, Northbound API client, yield ledger, service
   deco/              TP-Link Deco: mesh reader, internet sensor, fixed-address reservations
   network_api.py     /api/network routes (need the caller's gateway token)
+  auth.py            setup PIN, sessions; with cube/server.py's guard, who may change things
   app.py             wiring and lifecycle
 ```
 

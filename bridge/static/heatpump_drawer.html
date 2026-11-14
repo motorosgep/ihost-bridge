@@ -55,6 +55,11 @@
   <dl id="facts"></dl>
 </section>
 <div id="msg"></div>
+<div id="unlock" hidden style="margin-top:8px">
+  <div class="muted">Changes need the bridge's setup PIN.</div>
+  <input id="pin" type="password" inputmode="numeric" placeholder="Setup PIN" style="font:inherit;padding:.35rem;margin-top:6px">
+  <button id="pin-btn" style="font:inherit;padding:.35rem .8rem">Unlock</button>
+</div>
 
 <script>
   let data = null, pending = {};
@@ -92,12 +97,23 @@
     $('facts').innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   }
 
+  // Changes need a session for the bridge's setup PIN (the iHost console shows this page in a frame,
+  // so it keeps its own session rather than sharing the setup page's).
+  function session() { try { return localStorage.getItem('bridge-session') || ''; } catch (e) { return ''; } }
+  $('pin-btn').onclick = async () => {
+    const r = await (await fetch('/api/auth/unlock', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pin: $('pin').value})})).json();
+    $('pin').value = '';
+    if (r.ok) { try { localStorage.setItem('bridge-session', r.session); } catch (e) {} $('unlock').hidden = true; $('msg').textContent = 'Unlocked'; }
+    else $('msg').textContent = r.error;
+  };
+
   async function control(serial, state, label) {
     document.body.classList.add('busy');
     $('msg').textContent = `Sending: ${label}…`;
     try {
-      const r = await (await fetch('/api/control', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({third_serial: serial, state})})).json();
-      $('msg').textContent = r.ok ? `${label}: sent` : `${label}: ${r.error}`;
+      const r = await (await fetch('/api/control', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Bridge-Session': session()}, body: JSON.stringify({third_serial: serial, state})})).json();
+      if (r.locked) { $('unlock').hidden = false; $('msg').textContent = `${label}: not sent, unlock first`; }
+      else $('msg').textContent = r.ok ? `${label}: sent` : `${label}: ${r.error}`;
     } catch (e) { $('msg').textContent = `${label}: failed (${e})`; }
     document.body.classList.remove('busy');
     setTimeout(refresh, 1500);

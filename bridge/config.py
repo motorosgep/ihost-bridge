@@ -20,6 +20,7 @@ class CubeConfig:
     service_host: str | None = None
     public_host: str | None = None  # address browsers use for the bridge's UI cards
     port: int = 9900
+    webhook_any_source: bool = False  # accept gateway directives from any address (if the gateway's own is not recognised)
 
 
 @dataclass
@@ -114,6 +115,7 @@ def load(path: str | None = None) -> Config:
         service_host=_env("CUBE_SERVICE_HOST", c.get("service_host")),
         public_host=_env("CUBE_PUBLIC_HOST", c.get("public_host")),
         port=int(_env("BRIDGE_PORT", c.get("port", 9900))),
+        webhook_any_source=str(_env("WEBHOOK_ANY_SOURCE", c.get("webhook_any_source", False))).lower() in ("1", "true", "yes"),
     )
     cards_raw = raw.get("cards") or {}
     cards = CardsConfig(heatpump=bool(cards_raw.get("heatpump", False)))

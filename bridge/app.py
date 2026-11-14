@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import signal
@@ -41,6 +42,12 @@ class BridgeApp:
         self.deco: Any = None
         self._gateway_ip: str | None = None
         self._hub_tokens: dict[str, float] = {}  # tokens apps showed us, and until when they count as checked
+        from bridge.auth import SetupAuth
+
+        self.auth = SetupAuth(cfg.data_dir)
+        self._pin_reset_pending = False
+        self._webhook_sources: set[str] = set()
+        self._webhook_warned = False
 
     # ----- lifecycle ---------------------------------------------------------
 
@@ -306,6 +313,50 @@ class BridgeApp:
             return f"saved; {st['error']}"
         return f"connected: {st['units']} Deco unit(s), {st['clients_online']} client(s) online, {st['reservations']} reservation(s)"
 
+    def webhook_source_ok(self, ip: str | None) -> bool:
+        """Gateway directives carry no credentials, so only the gateway's own addresses may send them:
+        loopback, the gateway's reported IP, what its host name resolves to, and (as an add-on on the
+        gateway's host network) this machine's own LAN address."""
+        if self.cfg.cube.webhook_any_source:
+            return True
+        ip = (ip or "").removeprefix("::ffff:")
+        try:
+            if ipaddress.ip_address(ip).is_loopback:
+                return True
+        except ValueError:
+            return False
+        if not self._webhook_sources:
+            self._webhook_sources = self._gateway_addresses()
+        if ip in self._webhook_sources:
+            return True
+        # The gateway may have moved (new DHCP lease): look again before refusing.
+        self._webhook_sources = self._gateway_addresses()
+        if not self._webhook_sources:
+            if not self._webhook_warned:
+                log.warning("Gateway address unknown: accepting directives from any address until it is known")
+                self._webhook_warned = True
+            return True
+        if ip not in self._webhook_sources:
+            log.warning("Refused a directive from %s: not the gateway (%s); set cube.webhook_any_source if this is wrong", ip, ", ".join(sorted(self._webhook_sources)))
+            return False
+        return True
+
+    def _gateway_addresses(self) -> set[str]:
+        out: set[str] = set()
+        if self._gateway_ip:
+            out.add(self._gateway_ip)
+        try:
+            out.update(socket.gethostbyname_ex(self.cfg.cube.host.split(":")[0])[2])
+        except OSError:
+            pass
+        if self.cfg.cube.host in LOCAL_GATEWAY_NAMES or self._gateway_ip:
+            try:
+                out.add(_local_ip_towards(self._gateway_ip or "8.8.8.8"))
+            except OSError:
+                pass
+        out.discard("0.0.0.0")
+        return out
+
     HUB_TOKEN_TTL = 600.0
 
     async def hub_token_ok(self, token: str | None) -> bool:
@@ -390,13 +441,25 @@ class BridgeApp:
         self._token_task = asyncio.ensure_future(self._token_flow())
         return True
 
+    def request_pin_reset(self) -> bool:
+        """Clear the setup PIN once someone presses Allow on the iHost (proof they can sign in to it)."""
+        self._pin_reset_pending = True
+        started = self.request_token()
+        if not started:
+            log.info("Setup PIN reset will happen with the token request already waiting for Allow")
+        return True
+
     async def _token_flow(self) -> None:
         assert self.client
         self.message = "Waiting for you to press Allow on the iHost (5 minutes)"
         log.info(self.message)
         if await self.client.wait_for_token():
+            if self._pin_reset_pending:
+                self._pin_reset_pending = False
+                self.auth.clear()
             await self.sync()
         else:
+            self._pin_reset_pending = False
             self.message = "Timed out waiting for the token; press Get Token again"
             log.warning(self.message)
 
@@ -464,6 +527,7 @@ class BridgeApp:
         return {
             "version": __version__,
             "message": self.message,
+            "auth": {"pin_set": self.auth.pin_set, "pin_reset_pending": self._pin_reset_pending},
             "setup": {
                 "keys_file": str(keys_file) if keys_file else None,
                 "keys_present": bool(keys_file and keys_file.is_file()),

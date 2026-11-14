@@ -4,6 +4,7 @@
 log_level: INFO                 # LOG_LEVEL
 
 cube:
+  # webhook_any_source: false  # WEBHOOK_ANY_SOURCE. Accept gateway directives from any address, not just the gateway's own
   host: ihost                   # CUBE_HOST. Inside the iHost add-on "ihost" resolves to the gateway.
                                 # When running the bridge on another machine use the iHost IP, e.g. 192.168.1.50
   app_name: ihost-bridge        # CUBE_APP_NAME, shown in the iHost token prompt

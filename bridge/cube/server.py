@@ -19,8 +19,43 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# Changes that need no credentials: asking the gateway for a token (someone still has to press Allow on
+# the iHost), and the PIN routes themselves. The network routes check the caller's gateway token themselves.
+OPEN_WRITES = {"/api/token", "/api/auth/setup", "/api/auth/unlock", "/api/auth/reset"}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+async def caller_allowed(request: web.Request) -> bool:
+    """A setup-page session or an app's gateway access token."""
+    bridge: BridgeApp = request.app["bridge"]
+    if bridge.auth.session_ok(request.headers.get("X-Bridge-Session")):
+        return True
+    header = request.headers.get("Authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else None
+    return bool(token) and await bridge.hub_token_ok(token)
+
+
+@web.middleware
+async def guard(request: web.Request, handler):  # noqa: ANN001
+    """Everything that changes a device, the router or the settings needs a PIN session or a gateway token."""
+    if request.method in SAFE_METHODS:
+        return await handler(request)
+    bridge: BridgeApp = request.app["bridge"]
+    path = request.path
+    if path == "/webhook":
+        if not bridge.webhook_source_ok(request.remote):
+            return web.json_response({"error": "directives are accepted from the gateway only"}, status=403)
+    elif path not in OPEN_WRITES and not path.startswith("/api/network/"):
+        if not await caller_allowed(request):
+            return web.json_response(
+                {"ok": False, "error": "locked: enter the setup PIN on the bridge's web page (apps send their iHost access token)", "locked": True},
+                status=401,
+            )
+    return await handler(request)
+
+
 def make_app(bridge: BridgeApp) -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[guard])
     app["bridge"] = bridge
     app["recorder"] = bridge.recorder
     app.add_routes(history_routes())
@@ -32,6 +67,10 @@ def make_app(bridge: BridgeApp) -> web.Application:
             web.get("/", index),
             web.get("/api/status", api_status),
             web.post("/api/token", api_token),
+            web.get("/api/auth", api_auth),
+            web.post("/api/auth/setup", api_auth_setup),
+            web.post("/api/auth/unlock", api_auth_unlock),
+            web.post("/api/auth/reset", api_auth_reset),
             web.post("/api/sync", api_sync),
             web.get("/api/raw", api_raw),
             web.post("/api/debug/query", api_debug_query),
@@ -160,6 +199,51 @@ async def webhook(request: web.Request) -> web.Response:
     return web.json_response(response)
 
 
+async def api_auth(request: web.Request) -> web.Response:
+    bridge: BridgeApp = request.app["bridge"]
+    return web.json_response({"pin_set": bridge.auth.pin_set, "unlocked": bridge.auth.session_ok(request.headers.get("X-Bridge-Session"))})
+
+
+async def _pin_from(request: web.Request) -> str:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(body.get("pin") or "") if isinstance(body, dict) else ""
+
+
+async def api_auth_setup(request: web.Request) -> web.Response:
+    """Choose the setup PIN; only while none is set."""
+    bridge: BridgeApp = request.app["bridge"]
+    try:
+        session = bridge.auth.set_first_pin(await _pin_from(request))
+    except PermissionError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=409)
+    except ValueError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    return web.json_response({"ok": True, "session": session})
+
+
+async def api_auth_unlock(request: web.Request) -> web.Response:
+    from bridge.auth import PinLocked
+
+    bridge: BridgeApp = request.app["bridge"]
+    try:
+        session = bridge.auth.unlock(await _pin_from(request))
+    except PinLocked as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=429)
+    if session is None:
+        return web.json_response({"ok": False, "error": "wrong PIN" if bridge.auth.pin_set else "no PIN set yet"}, status=401)
+    return web.json_response({"ok": True, "session": session})
+
+
+async def api_auth_reset(request: web.Request) -> web.Response:
+    """Forgot the PIN: it is cleared once someone presses Allow on the iHost."""
+    bridge: BridgeApp = request.app["bridge"]
+    bridge.request_pin_reset()
+    return web.json_response({"ok": True, "message": "Open the iHost web console and press Allow within 5 minutes; the PIN is then cleared."})
+
+
 async def api_status(request: web.Request) -> web.Response:
     bridge: BridgeApp = request.app["bridge"]
     return web.json_response(bridge.status())
@@ -202,6 +286,17 @@ INDEX_HTML = """<!doctype html>
 <body>
 <h1>ihost-bridge</h1>
 <div class="muted" id="gateway">Loading…</div>
+
+<div class="card" id="lock" hidden>
+  <div class="row"><strong id="lock-title">Setup PIN</strong><span id="lock-state" class="pill">…</span></div>
+  <p class="muted" id="lock-hint"></p>
+  <div class="row">
+    <input id="lock-pin" type="password" inputmode="numeric" style="font:inherit;padding:.4rem;flex:1" placeholder="PIN (at least 6 characters)" autocomplete="off">
+    <button class="primary" id="lock-btn" onclick="lockAction()">Unlock</button>
+    <button id="lock-reset" onclick="resetPin()">Forgot PIN</button>
+  </div>
+  <div id="lock-msg" class="muted" style="margin-top:.5rem"></div>
+</div>
 
 <div class="card">
   <div class="row">
@@ -274,11 +369,50 @@ INDEX_HTML = """<!doctype html>
 </div>
 
 <script>
+// Changes need a session for the setup PIN; reading does not.
+let pinSet = true;
+function session() { try { return localStorage.getItem('bridge-session') || ''; } catch (e) { return ''; } }
+async function bfetch(url, opts = {}) {
+  const r = await fetch(url, {...opts, headers: {...(opts.headers || {}), 'X-Bridge-Session': session()}});
+  if (r.status === 401) { checkLock(); }
+  return r;
+}
+async function checkLock() {
+  const a = await (await fetch('/api/auth', {headers: {'X-Bridge-Session': session()}})).json();
+  pinSet = a.pin_set;
+  const card = document.getElementById('lock');
+  card.hidden = a.unlocked;
+  document.getElementById('lock-title').textContent = a.pin_set ? 'Locked' : 'Choose a setup PIN';
+  document.getElementById('lock-state').textContent = a.pin_set ? 'enter the PIN to make changes' : 'no PIN yet';
+  document.getElementById('lock-state').className = 'pill bad';
+  document.getElementById('lock-btn').textContent = a.pin_set ? 'Unlock' : 'Set PIN';
+  document.getElementById('lock-reset').hidden = !a.pin_set;
+  document.getElementById('lock-hint').textContent = a.pin_set
+    ? 'Changes (devices, keys, solar, router) need the setup PIN. Reading works without it.'
+    : 'Anyone on the home network can open this page, so changes are protected by a PIN. Choose one now (at least 6 characters); this browser stays unlocked.';
+}
+async function lockAction() {
+  const pin = document.getElementById('lock-pin').value;
+  const r = await fetch(pinSet ? '/api/auth/unlock' : '/api/auth/setup', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pin})});
+  const j = await r.json();
+  document.getElementById('lock-pin').value = '';
+  if (j.ok) { try { localStorage.setItem('bridge-session', j.session); } catch (e) {} document.getElementById('lock-msg').textContent = ''; }
+  else document.getElementById('lock-msg').textContent = 'Error: ' + j.error;
+  checkLock();
+}
+async function resetPin() {
+  const j = await (await fetch('/api/auth/reset', {method: 'POST'})).json();
+  document.getElementById('lock-msg').textContent = j.message;
+}
+checkLock();
+</script>
+
+<script>
 let decoFilled = false;
 async function saveDeco(off) {
   const v = id => document.getElementById(id).value;
   document.getElementById('deco-msg').textContent = off ? 'Switching off…' : 'Connecting…';
-  const r = await fetch('/api/setup/deco', {method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await bfetch('/api/setup/deco', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(off ? {host: ''} : {host: v('deco-host').trim(), password: v('deco-password')})});
   const j = await r.json();
   document.getElementById('deco-msg').textContent = j.ok ? j.message : ('Error: ' + j.error);
@@ -304,7 +438,7 @@ let solarFilled = false;
 async function saveSolar() {
   const v = id => document.getElementById(id).value.trim();
   document.getElementById('solar-msg').textContent = 'Saving…';
-  const r = await fetch('/api/setup/solar', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+  const r = await bfetch('/api/setup/solar', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
     kiosk_url: v('solar-kiosk'),
     api: {user_name: v('solar-user'), system_code: v('solar-code'), host: v('solar-host'), station_code: v('solar-station')},
   })});
@@ -333,12 +467,12 @@ function showSolar(so) {
   }
 }
 async function postText(url, text) {
-  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: text});
+  const r = await bfetch(url, {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: text});
   const j = await r.json(); return j.ok ? j.message : ('Error: ' + (j.error || j.message));
 }
 async function saveKeys() { document.getElementById('setup-msg').textContent = 'Saving…'; document.getElementById('setup-msg').textContent = await postText('/api/setup/keys', document.getElementById('keys').value); refresh(); }
 async function saveConfig() { document.getElementById('setup-msg').textContent = 'Saving…'; document.getElementById('setup-msg').textContent = await postText('/api/setup/config', document.getElementById('config').value); refresh(); }
-async function reloadDevices() { document.getElementById('setup-msg').textContent = 'Reconnecting…'; const j = await (await fetch('/api/reload', {method: 'POST'})).json(); document.getElementById('setup-msg').textContent = j.message; refresh(); }
+async function reloadDevices() { document.getElementById('setup-msg').textContent = 'Reconnecting…'; const j = await (await bfetch('/api/reload', {method: 'POST'})).json(); document.getElementById('setup-msg').textContent = j.message || ('Error: ' + j.error); refresh(); }
 </script>
 
 <script>
@@ -369,8 +503,8 @@ async function refresh() {
 }
 async function getToken() { await fetch('/api/token', {method: 'POST'}); refresh(); }
 async function sync() {
-  const r = await (await fetch('/api/sync', {method: 'POST'})).json();
-  document.getElementById('msg').textContent = r.message; refresh();
+  const r = await (await bfetch('/api/sync', {method: 'POST'})).json();
+  document.getElementById('msg').textContent = r.message || r.error; refresh();
 }
 refresh(); setInterval(refresh, 3000);
 </script>
