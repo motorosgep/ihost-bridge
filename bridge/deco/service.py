@@ -301,10 +301,12 @@ class DecoService:
                     self._unit_of[_mac(client.mac)] = unit
                     if client.online:
                         self._online_per_unit.add(_mac(client.mac))
+        # Skip the Deco units themselves. (`client_mesh` is not that: an X20 sets it on ordinary clients.)
+        unit_macs = {_mac(u.mac) for u in units}
         for client in clients:
-            if client.client_mesh:
-                continue  # another Deco unit, not a client
             mac = _mac(client.mac)
+            if mac in unit_macs:
+                continue
             host = str(client.access_host or "").upper()
             unit = self._unit_of.get(mac) or by_unit.get(host) or by_unit.get(_mac(host).upper())
             entry = _client(client, unit.mac if unit else "", _unit_name(unit) if unit else None)
