@@ -4,7 +4,7 @@
 
 FROM python:3.14-slim AS builder
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libffi-dev && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml README.md ./
 COPY bridge ./bridge
 RUN pip wheel --no-cache-dir --wheel-dir /wheels .
