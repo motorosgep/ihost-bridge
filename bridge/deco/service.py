@@ -1,4 +1,4 @@
-"""Reads the Deco mesh with the admin password (units, clients, internet status) for apps,
+"""Reads the Deco mesh with the admin password (units, clients, internet status, traffic) for apps,
 and adds or removes fixed-IP (DHCP) reservations on request. Nothing is added to the
 gateway: the network lives in Butter, not in the iHost's device list.
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from bridge.config import DecoConfig
-from bridge.deco.speedtest import SpeedTest
+from bridge.deco.traffic import TrafficLog
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +97,8 @@ class DecoService:
         self._online_per_unit: set[str] = set()
         # Filled in by the app: IP -> label for devices it knows (the gateway, Midea units).
         self.known_ips: Callable[[], dict[str, str]] = dict
-        self.speedtest = SpeedTest(data_dir)
+        self.traffic = TrafficLog(data_dir)
+        (data_dir / "speedtest.json").unlink(missing_ok=True)  # 0.4.1's speed test, which only measured the hub's 100 Mbit port
         self._load_settings()
 
     # ----- settings -------------------------------------------------------------
@@ -207,8 +208,6 @@ class DecoService:
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             await self.tick()
-            if self.configured and self.speedtest.due():
-                self.speedtest.start()  # runs on its own; the mesh keeps being read meanwhile
             try:
                 await asyncio.wait_for(stop.wait(), 15)
             except asyncio.TimeoutError:
@@ -287,6 +286,8 @@ class DecoService:
                 entry["online"] = False
                 if snap.fetched_at - entry.get("last_seen", 0) > FORGET_AFTER:
                     del snap.clients[mac]
+        known = self.known_ips()
+        self.traffic.record([{**e, "known_as": known.get(e.get("ip") or "")} for e in snap.clients.values() if e.get("online")], snap.fetched_at)
 
     async def _log_raw_summary(self) -> None:
         """Once per start: what the raw client records look like (field names, online flags, where they
@@ -458,7 +459,7 @@ class DecoService:
             "units": snap.units,
             "clients": clients,
             "reservations": {"items": snap.reservations, "max": snap.reservation_max or None},
-            "speedtest": self.speedtest.status(),
+            "traffic_now": self.traffic.now,
         }
 
     def status(self) -> dict[str, Any]:

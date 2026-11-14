@@ -33,7 +33,11 @@ some devices. Once synced it is an ordinary hub device for Butter.
 **Built in 0.4.0:** the mesh reader and fixed-address reservations (see the
 README); Butter has a Network tab. 0.4.0 also put an "Internet" contact sensor on
 the iHost; 0.4.1 dropped it (a door sensor reading open/closed was confusing, and
-nobody automates on it) and deletes it from the iHost on the next sync. Presence sensors per
+nobody automates on it) and deletes it from the iHost on the next sync. 0.4.1
+also tried an internet speed test run from the iHost; the iHost's Ethernet port
+is 10/100, so it could never read more than about 94 Mbit/s, and 0.4.2 replaced
+it with a traffic history from the Deco's per-device rates. The Deco's own
+speed test runs through TP-Link's cloud and is not readable locally. Presence sensors per
 phone, blocking and a guest Wi-Fi switch are not built yet.
 
 **Verified:** the Deco's LAN address answers the legacy RSA login endpoints
