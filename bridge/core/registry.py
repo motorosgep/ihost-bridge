@@ -67,6 +67,12 @@ class Registry:
         self.endpoints.pop(third_serial, None)
         self._reported.pop(third_serial, None)
 
+    def forget(self, third_serial: str) -> None:
+        """Forget an endpoint and its gateway serial, after the device was deleted on the gateway."""
+        self.remove(third_serial)
+        if self.serials.pop(third_serial, None) is not None:
+            self._save_serials()
+
     def is_current(self, endpoint: Endpoint) -> bool:
         return self.endpoints.get(endpoint.third_serial) is endpoint
 

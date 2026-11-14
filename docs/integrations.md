@@ -30,8 +30,10 @@ some devices. Once synced it is an ordinary hub device for Butter.
 
 ## TP-Link Deco
 
-**Built in 0.4.0:** the mesh reader, the "Internet" contact sensor and fixed-address
-reservations (see the README); Butter has a Network screen. Presence sensors per
+**Built in 0.4.0:** the mesh reader and fixed-address reservations (see the
+README); Butter has a Network tab. 0.4.0 also put an "Internet" contact sensor on
+the iHost; 0.4.1 dropped it (a door sensor reading open/closed was confusing, and
+nobody automates on it) and deletes it from the iHost on the next sync. Presence sensors per
 phone, blocking and a guest Wi-Fi switch are not built yet.
 
 **Verified:** the Deco's LAN address answers the legacy RSA login endpoints

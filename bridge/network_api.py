@@ -3,6 +3,7 @@
 GET    /api/network                     the mesh: internet, Deco units, clients, reservations
 POST   /api/network/reservations        {"items": [{"mac", "ip"}, ...]}: add or change fixed IPs
 DELETE /api/network/reservations/{mac}  drop one fixed IP
+POST   /api/network/speedtest           run an internet speed test now (at most every 2 minutes)
 POST   /api/setup/deco                  {"host", "password"} from the setup page
 
 The network routes show who is home and change the router, so they need the
@@ -33,6 +34,8 @@ def network_routes() -> list[web.RouteDef]:
         web.get("/api/network", api_network),
         web.post("/api/network/reservations", api_reserve),
         web.delete("/api/network/reservations/{mac}", api_unreserve),
+        web.post("/api/network/speedtest", api_speedtest),
+        web.options("/api/network/speedtest", preflight),
         web.options("/api/network", preflight),
         web.options("/api/network/reservations", preflight),
         web.options("/api/network/reservations/{mac}", preflight),
@@ -113,6 +116,27 @@ async def api_unreserve(request: web.Request) -> web.Response:
     except Exception as exc:  # noqa: BLE001
         return _json({"ok": False, "error": f"the Deco refused the change: {exc}"}, 502)
     return _json({"ok": True, **result})
+
+
+async def api_speedtest(request: web.Request) -> web.Response:
+    """Run a speed test and answer with its result (10 to 40 seconds). Joins one that is already running."""
+    import asyncio
+
+    bridge: BridgeApp = request.app["bridge"]
+    if (denied := await _authorised(request)) is not None:
+        return denied
+    if bridge.deco is None or not bridge.deco.configured:
+        return _json({"ok": False, "error": "the Deco is not set up on the bridge"}, 409)
+    test = bridge.deco.speedtest
+    if not test.running and (wait := test.wait_left()):
+        return _json({"ok": False, "error": f"a test ran moments ago; try again in {wait} s", "last": test.last}, 429)
+    try:
+        result = await asyncio.wait_for(asyncio.shield(test.start()), 150)
+    except asyncio.TimeoutError:
+        return _json({"ok": False, "error": "the speed test is taking too long; its result shows up when it ends"}, 504)
+    if "error" in result:
+        return _json({"ok": False, "error": f"the speed test failed: {result['error']}", "result": result}, 502)
+    return _json({"ok": True, "result": result})
 
 
 async def api_setup_deco(request: web.Request) -> web.Response:

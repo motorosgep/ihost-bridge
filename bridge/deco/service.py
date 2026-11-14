@@ -1,5 +1,6 @@
-"""Reads the Deco mesh with the admin password, presents the internet connection to the
-gateway as a sensor, and adds or removes fixed-IP (DHCP) reservations on request.
+"""Reads the Deco mesh with the admin password (units, clients, internet status) for apps,
+and adds or removes fixed-IP (DHCP) reservations on request. Nothing is added to the
+gateway: the network lives in Butter, not in the iHost's device list.
 
 The Deco allows one admin session at a time and locks the login after repeated
 wrong passwords, so the service keeps one session open, logs in again only when a
@@ -15,13 +16,13 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from bridge.config import DecoConfig
-from bridge.core.endpoint import Endpoint, cap
+from bridge.deco.speedtest import SpeedTest
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ PER_UNIT_INTERVAL = 300       # which Deco each client is on (one slow call per 
 RESERVATION_INTERVAL = 300    # the reservation table changes only when someone edits it
 MIN_LOGIN_GAP = 60            # never log in more often than this
 LOGIN_BACKOFF = 1800          # after three logins in a row fail for network reasons
-STALE_AFTER = 600             # no good answer for this long: the internet sensor goes offline
 FORGET_AFTER = 7 * 86400      # offline clients stay listed this long after they were last seen
 
 MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
@@ -59,35 +59,6 @@ def _mac(value: str) -> str:
         return normalise_mac(value)
     except ValueError:
         return str(value or "")
-
-
-class InternetEndpoint(Endpoint):
-    """The home's internet connection as a gateway contact sensor: closed while online, open when down."""
-
-    display_category = "contactSensor"
-    manufacturer = "TP-Link"
-    model = "Deco"
-
-    def __init__(self, third_serial: str, name: str) -> None:
-        super().__init__(third_serial, name)
-        self.connected = True
-        self.online = False
-
-    def capabilities(self) -> list[dict[str, Any]]:
-        return [cap("contact", "0100")]
-
-    def state(self) -> dict[str, Any]:
-        return {"contact": {"contact": not self.connected}}
-
-    async def apply(self, state: dict[str, Any]) -> None:
-        raise ValueError("the internet sensor is read-only")
-
-    def update(self, connected: bool) -> None:
-        changed = connected != self.connected
-        self.connected = connected
-        self.set_online(True)
-        if changed:
-            self.notify_state()
 
 
 @dataclass
@@ -119,16 +90,14 @@ class DecoService:
         self.auth_refused: str | None = None
         self.error: str | None = None
         self.snap = Snapshot()
-        self._last_good = 0.0
         self._logged_access_host = False
         self._logged_per_unit = False
         self._per_unit_at = 0.0
         self._unit_of: dict[str, Any] = {}
         self._online_per_unit: set[str] = set()
-        self.endpoint: InternetEndpoint | None = None
-        self.on_endpoint_change: Callable[[], Awaitable[None]] | None = None
         # Filled in by the app: IP -> label for devices it knows (the gateway, Midea units).
         self.known_ips: Callable[[], dict[str, str]] = dict
+        self.speedtest = SpeedTest(data_dir)
         self._load_settings()
 
     # ----- settings -------------------------------------------------------------
@@ -238,6 +207,8 @@ class DecoService:
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             await self.tick()
+            if self.configured and self.speedtest.due():
+                self.speedtest.start()  # runs on its own; the mesh keeps being read meanwhile
             try:
                 await asyncio.wait_for(stop.wait(), 15)
             except asyncio.TimeoutError:
@@ -252,8 +223,6 @@ class DecoService:
                 await self._poll()
             if self.error is None and (force or now - self.snap.reservations_at >= RESERVATION_INTERVAL):
                 await self._read_reservations()
-            if self.endpoint is not None and time.time() - self._last_good > STALE_AFTER:
-                self.endpoint.set_online(False)
 
     async def _poll(self) -> None:
         snap = self.snap
@@ -278,7 +247,6 @@ class DecoService:
             log.warning("Deco: %s", self.error)
             return
         self.error = None
-        self._last_good = snap.fetched_at
         snap.units = [_unit(u) for u in units]
         snap.internet = {
             "online": internet.ipv4.inet_status == "online" or internet.ipv6.inet_status == "online",
@@ -319,7 +287,6 @@ class DecoService:
                 entry["online"] = False
                 if snap.fetched_at - entry.get("last_seen", 0) > FORGET_AFTER:
                     del snap.clients[mac]
-        await self._present(snap.internet["online"])
 
     async def _log_raw_summary(self) -> None:
         """Once per start: what the raw client records look like (field names, online flags, where they
@@ -372,15 +339,6 @@ class DecoService:
         self.snap.reservations = [{"mac": _mac(r.mac), "ip": r.ip} for r in table.reservations]
         self.snap.reservation_max = int(table.max_count or 0)
         self.snap.reservations_at = time.time()
-
-    async def _present(self, connected: bool) -> None:
-        changed = False
-        if self.endpoint is None:
-            self.endpoint = InternetEndpoint("deco-internet", self.cfg.name or "Internet")
-            changed = True
-        self.endpoint.update(connected)
-        if changed and self.on_endpoint_change is not None:
-            await self.on_endpoint_change()
 
     # ----- reservations ---------------------------------------------------------------------
 
@@ -500,7 +458,7 @@ class DecoService:
             "units": snap.units,
             "clients": clients,
             "reservations": {"items": snap.reservations, "max": snap.reservation_max or None},
-            "serial": self.endpoint.third_serial if self.endpoint else None,
+            "speedtest": self.speedtest.status(),
         }
 
     def status(self) -> dict[str, Any]:

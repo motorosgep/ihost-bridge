@@ -73,11 +73,10 @@ class BridgeApp:
             from bridge.deco.service import DecoService
 
             self.deco = DecoService(cfg.data_dir, cfg.deco)
-            self.deco.on_endpoint_change = self._deco_endpoint_changed
             self.deco.known_ips = self._known_ips
             await self._learn_gateway_ip()
             if self.deco.configured:
-                await self.deco.tick()  # read the mesh once now, so the internet sensor is registered with the first sync
+                await self.deco.tick()  # read the mesh once now, so the Network screen has data right away
 
             stop = asyncio.Event()
             recorder_task: asyncio.Task[None] | None = None
@@ -289,23 +288,10 @@ class BridgeApp:
                 out[str(ip)] = str(dev.name)
         return out
 
-    async def _deco_endpoint_changed(self) -> None:
-        assert self.registry and self.deco
-        endpoint = self.deco.endpoint
-        if endpoint is None:
-            return
-        if endpoint.third_serial not in self.registry.endpoints:
-            self.registry.add(endpoint)
-        if self._loop is not None and self.client and self.client.token and self.registry.synced:
-            await self.sync()
-
     async def save_deco(self, body: dict[str, Any]) -> str:
         assert self.registry and self.deco
         self.deco.save_settings(body)
         if not self.deco.configured:
-            if self.deco.endpoint is not None:
-                self.registry.remove(self.deco.endpoint.third_serial)
-                self.deco.endpoint = None
             return "Deco switched off"
         await self.deco.tick(force=True)
         st = self.deco.status()
@@ -376,6 +362,26 @@ class BridgeApp:
 
     # ----- gateway actions -----------------------------------------------------
 
+    # Devices earlier versions put on the gateway and this one no longer does.
+    RETIRED = ("deco-internet",)  # the Deco "Internet" contact sensor (0.4.0)
+
+    async def _retire_devices(self) -> None:
+        """Delete retired devices from the gateway, once each (the serial map then forgets them)."""
+        assert self.client and self.registry
+        for third in self.RETIRED:
+            serial = self.registry.serials.get(third)
+            if not serial or third in self.registry.endpoints:
+                continue
+            try:
+                await self.client.delete_device(serial)
+            except Exception as exc:  # noqa: BLE001
+                # 110000: no such device (already deleted on the gateway). Anything else: try at the next sync.
+                if not (isinstance(exc, CubeError) and "110000" in str(exc)):
+                    log.warning("Could not remove %s from the gateway: %s", third, exc)
+                    continue
+            self.registry.forget(third)
+            log.info("Removed %s from the gateway (no longer provided)", third)
+
     async def sync(self) -> tuple[bool, str]:
         assert self.client and self.registry
         if not self.client.token:
@@ -404,6 +410,7 @@ class BridgeApp:
         except Exception as exc:  # noqa: BLE001
             log.debug("state report after sync failed: %s", exc)
         self.message = f"Synced {len(mapping)} device(s) with the gateway"
+        await self._retire_devices()
         await self._ensure_cards()
         return True, self.message
 

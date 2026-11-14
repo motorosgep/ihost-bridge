@@ -179,8 +179,10 @@ the Deco app asks for). Fill in the main Deco's address and the password under
 - keeps one admin session open and reads the Deco units, the clients (name,
   address, wired or which band, which Deco) and the internet status once a
   minute, and the fixed-address (DHCP reservation) table every five minutes;
-- shows the internet connection on the iHost as a contact sensor named
-  "Internet", closed while online and open when it is down, for scenes;
+- runs an internet speed test from the iHost every six hours, and when an app
+  asks (round trip, then download and upload against Cloudflare's speed test
+  servers, 15 to 70 MB each time). It measures the iHost's own link, so read it
+  as "is the line as usual?";
 - adds, changes and removes fixed addresses when an app asks, after checking
   each one: inside the home network, not the Deco's own address, not held by
   another device, and within the Deco's limit.
@@ -225,7 +227,7 @@ bridge/
   core/registry.py   sync, change-only reporting, directive dispatch
   midea/             Midea adapters (ac.py, heatpump.py) on top of midea-local
   solar/             Huawei FusionSolar: kiosk reader, Northbound API client, yield ledger, service
-  deco/              TP-Link Deco: mesh reader, internet sensor, fixed-address reservations
+  deco/              TP-Link Deco: mesh reader, fixed-address reservations
   network_api.py     /api/network routes (need the caller's gateway token)
   auth.py            setup PIN, sessions; with cube/server.py's guard, who may change things
   app.py             wiring and lifecycle

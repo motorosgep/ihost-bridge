@@ -75,7 +75,7 @@ class DecoConfig:
     host: str | None = None        # the main Deco's LAN address, e.g. 192.168.68.1
     password: str | None = None    # the Deco admin password (the one the Deco app asks for)
     username: str = "admin"
-    name: str | None = None        # internet sensor name on the gateway; default "Internet"
+    name: str | None = None        # unused since 0.4.1 (was the internet sensor's name); kept so old configs load
 
 
 @dataclass

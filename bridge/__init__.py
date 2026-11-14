@@ -1,3 +1,3 @@
 """ihost-bridge: expose third-party appliances to a SONOFF iHost / eWeLink CUBE."""
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
